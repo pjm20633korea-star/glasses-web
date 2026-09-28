@@ -1,0 +1,457 @@
+<!DOCTYPE html>
+<html lang="ko">
+<head>
+<meta charset="UTF-8">
+<title>매장 관리자</title>
+<style>
+  * { box-sizing: border-box; }
+  body { font-family: "맑은 고딕", sans-serif; margin: 0; background: #f2f4f7; color: #222; font-size: 13px; }
+  header { background: #2b3a55; color: white; padding: 10px 16px; display: flex; align-items: center; gap: 10px; }
+  header .title { font-size: 15px; font-weight: bold; }
+  header button.headerbtn { background: #3d4f70; color: white; border: none; border-radius: 4px; padding: 6px 12px; font-size: 12px; cursor: pointer; }
+  header button.headerbtn:hover { background: #4d6188; }
+  header a { color: #cbd3e1; font-size: 12px; margin-left: auto; text-decoration: none; }
+  header a:hover { text-decoration: underline; }
+  .wrap { padding: 16px; max-width: 1000px; margin: 0 auto; }
+  .panel { background: white; border-radius: 8px; padding: 14px 16px; box-shadow: 0 1px 3px rgba(0,0,0,0.1); margin-bottom: 14px; }
+  h3 { margin: 0 0 10px; font-size: 13px; border-bottom: 2px solid #2b3a55; padding-bottom: 6px; color: #2b3a55; }
+  label { display: block; font-size: 11px; color: #555; margin-top: 6px; }
+  input, select { width: 100%; padding: 6px 8px; margin-top: 2px; border: 1px solid #ccc; border-radius: 4px; font-size: 12px; }
+  button { cursor: pointer; border: none; border-radius: 4px; padding: 7px 14px; font-size: 12px; font-weight: bold; background: #2b3a55; color: white; margin-top: 10px; }
+  button:hover { background: #3d4f70; }
+  button.btn-secondary { background: #8a93a6; }
+  button.btn-secondary:hover { background: #9aa3b6; }
+  button.btn-danger { background: #b23a48; }
+  button.btn-danger:hover { background: #c94a58; }
+  button.small { padding: 4px 8px; font-size: 11px; margin: 0 2px; }
+  table { border-collapse: collapse; width: 100%; margin-top: 8px; font-size: 12px; }
+  th, td { border: 1px solid #ddd; padding: 6px 8px; text-align: left; vertical-align: middle; }
+  th { background: #eef1f6; }
+  .form-row { display: flex; gap: 12px; flex-wrap: wrap; }
+  .form-row > div { flex: 1; min-width: 160px; }
+  .msg { font-size: 11px; margin-top: 6px; }
+  .msg.error { color: #b23a48; }
+  .msg.ok { color: #2e7d32; }
+  #loginBox { max-width: 320px; margin: 80px auto; }
+  #gate { display: none; }
+  .modal-overlay { position: fixed; inset: 0; background: rgba(0,0,0,0.4); display: none; align-items: center; justify-content: center; z-index: 999; }
+  .modal-box { background: white; border-radius: 8px; padding: 18px 20px; width: 340px; max-height: 90vh; overflow-y: auto; }
+  hr.sep { margin: 14px 0; border: none; border-top: 1px solid #e5e5e5; }
+</style>
+</head>
+<body>
+
+<div id="loginGate">
+  <div class="panel" id="loginBox">
+    <h3>👓 매장 관리자 로그인</h3>
+    <label>로그인 ID</label>
+    <input id="admin_login_id">
+    <label>비밀번호</label>
+    <input id="admin_login_password" type="password" onkeydown="if(event.key==='Enter') adminLogin();">
+    <div id="loginMsg" class="msg error" style="display:none;"></div>
+    <button onclick="adminLogin()">로그인</button>
+  </div>
+</div>
+
+<div id="gate">
+  <header>
+    <span class="title">🛠 매장 관리자</span>
+    <span id="whoami" style="font-size:12px; color:#cbd3e1;"></span>
+    <button class="headerbtn" onclick="openMyAccountModal()">🔑 내 계정 설정</button>
+    <button class="headerbtn" onclick="doAdminLogout()">로그아웃</button>
+    <a href="/">← 고객관리 화면으로</a>
+  </header>
+  <div class="wrap">
+
+    <div class="panel">
+      <h3>그룹 관리</h3>
+      <p style="font-size:11px; color:#888; margin-top:0;">같은 그룹에 속한 매장끼리는 고객/매출 데이터를 서로 읽기 전용으로 볼 수 있습니다.</p>
+      <div class="form-row">
+        <div>
+          <label>새 그룹 이름</label>
+          <input id="new_group_name" placeholder="예: OO안경 체인점">
+        </div>
+      </div>
+      <button onclick="createGroup()">그룹 만들기</button>
+      <div id="groupMsg" class="msg" style="display:none;"></div>
+
+      <table>
+        <thead><tr><th>No.</th><th>그룹명</th><th>소속 매장 수</th><th style="width:120px;">관리</th></tr></thead>
+        <tbody id="groupTableBody"></tbody>
+      </table>
+    </div>
+
+    <div class="panel">
+      <h3>매장 관리</h3>
+      <div class="form-row">
+        <div>
+          <label>매장 이름</label>
+          <input id="new_store_name" placeholder="예: 강남점">
+        </div>
+        <div>
+          <label>로그인 ID</label>
+          <input id="new_store_login_id" placeholder="예: gangnam">
+        </div>
+        <div>
+          <label>비밀번호</label>
+          <input id="new_store_password" type="password">
+        </div>
+        <div>
+          <label>소속 그룹 (비워두면 이 매장만의 독립 그룹이 새로 만들어짐)</label>
+          <select id="new_store_group"><option value="">-- 독립 매장으로 --</option></select>
+        </div>
+        <div>
+          <label>관리자 권한</label>
+          <select id="new_store_admin"><option value="0">일반 매장</option><option value="1">관리자</option></select>
+        </div>
+      </div>
+      <button onclick="createStore()">매장 만들기</button>
+      <div id="storeMsg" class="msg" style="display:none;"></div>
+
+      <table>
+        <thead><tr><th>No.</th><th>매장명</th><th>로그인 ID</th><th>소속 그룹</th><th>관리자</th><th style="width:150px;">관리</th></tr></thead>
+        <tbody id="storeTableBody"></tbody>
+      </table>
+    </div>
+
+  </div>
+</div>
+
+<!-- ============ 매장 수정 모달 ============ -->
+<div id="storeEditModal" class="modal-overlay">
+  <div class="modal-box">
+    <h3>매장 수정</h3>
+    <label>매장 이름</label>
+    <input id="edit_store_name">
+    <label>로그인 ID</label>
+    <input id="edit_store_login_id">
+    <label>관리자 권한</label>
+    <select id="edit_store_admin"><option value="0">일반 매장</option><option value="1">관리자</option></select>
+    <label>새 비밀번호 (비워두면 기존 비밀번호 유지)</label>
+    <input id="edit_store_password" type="password" placeholder="비밀번호를 잊어버린 매장에게 새로 발급할 때만 입력">
+    <div id="editStoreMsg" class="msg" style="display:none;"></div>
+    <div style="display:flex; gap:8px; margin-top:14px;">
+      <button style="flex:1;" onclick="saveStoreEdit()">저장</button>
+      <button class="btn-secondary" style="flex:1;" onclick="closeStoreEditModal()">취소</button>
+    </div>
+  </div>
+</div>
+
+<!-- ============ 내 계정 설정 모달 (관리자 본인의 로그인 ID / 비밀번호 변경) ============ -->
+<div id="myAccountModal" class="modal-overlay">
+  <div class="modal-box">
+    <h3>내 계정 설정</h3>
+    <p style="font-size:11px; color:#888; margin:4px 0 14px;">
+      매장: <b id="acctStoreName"></b> (현재 로그인 ID: <b id="acctLoginId"></b>)
+    </p>
+
+    <label>현재 비밀번호</label>
+    <input id="acct_current_password" type="password">
+
+    <hr class="sep">
+
+    <label>새 비밀번호</label>
+    <input id="acct_new_password" type="password" style="margin-bottom:8px;">
+    <label>새 비밀번호 확인</label>
+    <input id="acct_new_password2" type="password" style="margin-bottom:8px;"
+           onkeydown="if(event.key==='Enter') changePasswordAction();">
+    <button class="btn-secondary" style="width:100%;" onclick="changePasswordAction()">비밀번호 변경</button>
+
+    <div id="acctMsg" class="msg" style="display:none;"></div>
+
+    <button class="btn-danger" style="width:100%; margin-top:14px;" onclick="closeMyAccountModal()">닫기</button>
+  </div>
+</div>
+
+<script>
+let groups = [];
+let stores = [];
+let me = null;
+
+async function checkAdminAuth() {
+  const res = await fetch("/api/me");
+  if (!res.ok) { showLoginGate(); return; }
+  me = await res.json();
+  if (!me.is_admin) {
+    document.body.innerHTML = '<div style="padding:60px; text-align:center; color:#888;">관리자 권한이 있는 매장 계정으로만 접근할 수 있습니다.<br><a href="/">← 고객관리 화면으로</a></div>';
+    return;
+  }
+  document.getElementById("loginGate").style.display = "none";
+  document.getElementById("gate").style.display = "block";
+  document.getElementById("whoami").textContent = `${me.name} (관리자)`;
+  await loadGroups();
+  await loadStores();
+}
+
+function showLoginGate() {
+  document.getElementById("loginGate").style.display = "block";
+  document.getElementById("gate").style.display = "none";
+}
+
+async function doAdminLogout() {
+  const ok = confirm("로그아웃하시겠습니까?");
+  if (!ok) return;
+  await fetch("/api/logout", { method: "POST" });
+  location.reload();
+}
+
+async function adminLogin() {
+  const login_id = document.getElementById("admin_login_id").value.trim();
+  const password = document.getElementById("admin_login_password").value;
+  const msgEl = document.getElementById("loginMsg");
+  msgEl.style.display = "none";
+  const res = await fetch("/api/login", {
+    method: "POST", headers: {"Content-Type": "application/json"},
+    body: JSON.stringify({ login_id, password }),
+  });
+  if (!res.ok) {
+    const data = await res.json().catch(() => ({}));
+    msgEl.textContent = data.detail || "로그인에 실패했습니다.";
+    msgEl.style.display = "";
+    return;
+  }
+  checkAdminAuth();
+}
+
+async function loadGroups() {
+  const res = await fetch("/api/admin/groups");
+  groups = await res.json();
+  const sel = document.getElementById("new_store_group");
+  sel.innerHTML = '<option value="">-- 독립 매장으로 --</option>' +
+    groups.map(g => `<option value="${g.id}">${g.name}</option>`).join("");
+  renderGroupTable();
+}
+
+function renderGroupTable() {
+  const tbody = document.getElementById("groupTableBody");
+  tbody.innerHTML = "";
+  groups.forEach((g, i) => {
+    const storeCount = stores.filter(s => s.group_id === g.id).length;
+    const tr = document.createElement("tr");
+    tr.innerHTML = `
+      <td>${i + 1}</td>
+      <td>${g.name}</td>
+      <td>${storeCount}개</td>
+      <td>
+        <button class="small btn-secondary" onclick="renameGroup(${g.id}, '${g.name.replace(/'/g, "\\'")}')">이름변경</button>
+        <button class="small btn-danger" onclick="deleteGroup(${g.id})">삭제</button>
+      </td>
+    `;
+    tbody.appendChild(tr);
+  });
+}
+
+async function loadStores() {
+  const res = await fetch("/api/admin/stores");
+  stores = await res.json();
+  renderStoreTable();
+  renderGroupTable();
+}
+
+function renderStoreTable() {
+  const tbody = document.getElementById("storeTableBody");
+  tbody.innerHTML = "";
+  stores.forEach((s, i) => {
+    const tr = document.createElement("tr");
+    const groupOptions = groups.map(g =>
+      `<option value="${g.id}" ${g.id === s.group_id ? "selected" : ""}>${g.name}</option>`
+    ).join("");
+    tr.innerHTML = `
+      <td>${i + 1}</td>
+      <td>${s.name}</td>
+      <td>${s.login_id}</td>
+      <td><select onchange="moveStoreGroup(${s.id}, this.value)">${groupOptions}</select></td>
+      <td>${s.is_admin ? "✅" : ""}</td>
+      <td>
+        <button class="small btn-secondary" onclick="openStoreEditModal(${s.id})">수정</button>
+        <button class="small btn-danger" onclick="deleteStore(${s.id})">삭제</button>
+      </td>
+    `;
+    tbody.appendChild(tr);
+  });
+}
+
+async function createGroup() {
+  const name = document.getElementById("new_group_name").value.trim();
+  const msgEl = document.getElementById("groupMsg");
+  if (!name) { msgEl.className = "msg error"; msgEl.textContent = "그룹 이름을 입력해 주세요."; msgEl.style.display = ""; return; }
+  const res = await fetch("/api/admin/groups", {
+    method: "POST", headers: {"Content-Type": "application/json"}, body: JSON.stringify({ name }),
+  });
+  if (!res.ok) { msgEl.className = "msg error"; msgEl.textContent = "그룹 생성 중 오류가 발생했습니다."; msgEl.style.display = ""; return; }
+  document.getElementById("new_group_name").value = "";
+  msgEl.className = "msg ok"; msgEl.textContent = "그룹이 만들어졌습니다."; msgEl.style.display = "";
+  await loadGroups();
+  await loadStores();
+}
+
+async function renameGroup(groupId, currentName) {
+  const name = prompt("새 그룹 이름을 입력하세요.", currentName);
+  if (name === null) return;
+  const trimmed = name.trim();
+  if (!trimmed) { alert("그룹 이름을 입력해 주세요."); return; }
+  const res = await fetch(`/api/admin/groups/${groupId}`, {
+    method: "PUT", headers: {"Content-Type": "application/json"}, body: JSON.stringify({ name: trimmed }),
+  });
+  if (!res.ok) {
+    const data = await res.json().catch(() => ({}));
+    alert(data.detail || "그룹 이름 변경 중 오류가 발생했습니다.");
+    return;
+  }
+  await loadGroups();
+  await loadStores();
+}
+
+async function deleteGroup(groupId) {
+  const ok = confirm("이 그룹을 삭제하시겠습니까? (그룹에 속한 매장이 있으면 삭제할 수 없습니다)");
+  if (!ok) return;
+  const res = await fetch(`/api/admin/groups/${groupId}`, { method: "DELETE" });
+  if (!res.ok) {
+    const data = await res.json().catch(() => ({}));
+    alert(data.detail || "그룹 삭제 중 오류가 발생했습니다.");
+    return;
+  }
+  await loadGroups();
+  await loadStores();
+}
+
+async function createStore() {
+  const name = document.getElementById("new_store_name").value.trim();
+  const login_id = document.getElementById("new_store_login_id").value.trim();
+  const password = document.getElementById("new_store_password").value;
+  const group_id = document.getElementById("new_store_group").value || null;
+  const is_admin = document.getElementById("new_store_admin").value === "1";
+  const msgEl = document.getElementById("storeMsg");
+  if (!name || !login_id || !password) {
+    msgEl.className = "msg error"; msgEl.textContent = "매장 이름/로그인 ID/비밀번호를 모두 입력해 주세요."; msgEl.style.display = "";
+    return;
+  }
+  const res = await fetch("/api/admin/stores", {
+    method: "POST", headers: {"Content-Type": "application/json"},
+    body: JSON.stringify({ name, login_id, password, group_id: group_id ? Number(group_id) : null, is_admin }),
+  });
+  if (!res.ok) {
+    const data = await res.json().catch(() => ({}));
+    msgEl.className = "msg error"; msgEl.textContent = data.detail || "매장 생성 중 오류가 발생했습니다."; msgEl.style.display = "";
+    return;
+  }
+  document.getElementById("new_store_name").value = "";
+  document.getElementById("new_store_login_id").value = "";
+  document.getElementById("new_store_password").value = "";
+  msgEl.className = "msg ok"; msgEl.textContent = "매장이 만들어졌습니다."; msgEl.style.display = "";
+  await loadGroups();
+  await loadStores();
+}
+
+async function moveStoreGroup(storeId, groupId) {
+  await fetch(`/api/admin/stores/${storeId}/group`, {
+    method: "PUT", headers: {"Content-Type": "application/json"},
+    body: JSON.stringify({ group_id: Number(groupId) }),
+  });
+  await loadStores();
+}
+
+/* ---------- 매장 수정 모달 ---------- */
+let editingStoreId = null;
+
+function openStoreEditModal(storeId) {
+  const s = stores.find(x => x.id === storeId);
+  if (!s) return;
+  editingStoreId = storeId;
+  document.getElementById("edit_store_name").value = s.name;
+  document.getElementById("edit_store_login_id").value = s.login_id;
+  document.getElementById("edit_store_admin").value = s.is_admin ? "1" : "0";
+  document.getElementById("edit_store_password").value = "";
+  document.getElementById("editStoreMsg").style.display = "none";
+  document.getElementById("storeEditModal").style.display = "flex";
+}
+
+function closeStoreEditModal() {
+  document.getElementById("storeEditModal").style.display = "none";
+  editingStoreId = null;
+}
+
+async function saveStoreEdit() {
+  const name = document.getElementById("edit_store_name").value.trim();
+  const login_id = document.getElementById("edit_store_login_id").value.trim();
+  const is_admin = document.getElementById("edit_store_admin").value === "1";
+  const new_password = document.getElementById("edit_store_password").value;
+  const msgEl = document.getElementById("editStoreMsg");
+  if (!name || !login_id) {
+    msgEl.className = "msg error"; msgEl.textContent = "매장 이름과 로그인 ID를 입력해 주세요."; msgEl.style.display = "";
+    return;
+  }
+  const body = { name, login_id, is_admin };
+  if (new_password) body.new_password = new_password;
+  const res = await fetch(`/api/admin/stores/${editingStoreId}`, {
+    method: "PUT", headers: {"Content-Type": "application/json"}, body: JSON.stringify(body),
+  });
+  if (!res.ok) {
+    const data = await res.json().catch(() => ({}));
+    msgEl.className = "msg error"; msgEl.textContent = data.detail || "매장 수정 중 오류가 발생했습니다."; msgEl.style.display = "";
+    return;
+  }
+  closeStoreEditModal();
+  await loadStores();
+  if (editingStoreId === me.id) await checkAdminAuth(); // 내 계정 정보를 수정했다면 헤더도 새로 반영
+}
+
+async function deleteStore(storeId) {
+  const ok = confirm("이 매장을 삭제하시겠습니까? (저장된 고객/매출 데이터가 있으면 삭제할 수 없습니다)");
+  if (!ok) return;
+  const res = await fetch(`/api/admin/stores/${storeId}`, { method: "DELETE" });
+  if (!res.ok) {
+    const data = await res.json().catch(() => ({}));
+    alert(data.detail || "매장 삭제 중 오류가 발생했습니다.");
+    return;
+  }
+  await loadGroups();
+  await loadStores();
+}
+
+/* ---------- 내 계정 설정 모달 ---------- */
+function openMyAccountModal() {
+  if (!me) return;
+  document.getElementById("acctStoreName").textContent = me.name;
+  document.getElementById("acctLoginId").textContent = me.login_id;
+  document.getElementById("acct_current_password").value = "";
+  document.getElementById("acct_new_password").value = "";
+  document.getElementById("acct_new_password2").value = "";
+  document.getElementById("acctMsg").style.display = "none";
+  document.getElementById("myAccountModal").style.display = "flex";
+}
+
+function closeMyAccountModal() {
+  document.getElementById("myAccountModal").style.display = "none";
+}
+
+function showAcctMsg(text, isError) {
+  const el = document.getElementById("acctMsg");
+  el.textContent = text;
+  el.className = "msg " + (isError ? "error" : "ok");
+  el.style.display = "";
+}
+
+async function changePasswordAction() {
+  const current_password = document.getElementById("acct_current_password").value;
+  const new_password = document.getElementById("acct_new_password").value;
+  const new_password2 = document.getElementById("acct_new_password2").value;
+  if (!current_password) { showAcctMsg("현재 비밀번호를 입력해 주세요.", true); return; }
+  if (!new_password) { showAcctMsg("새 비밀번호를 입력해 주세요.", true); return; }
+  if (new_password !== new_password2) { showAcctMsg("새 비밀번호가 서로 일치하지 않습니다.", true); return; }
+  const res = await fetch("/api/change-password", {
+    method: "POST", headers: {"Content-Type": "application/json"},
+    body: JSON.stringify({ current_password, new_password }),
+  });
+  const data = await res.json().catch(() => ({}));
+  if (!res.ok) { showAcctMsg(data.detail || "비밀번호 변경에 실패했습니다.", true); return; }
+  showAcctMsg("비밀번호가 변경되었습니다.", false);
+  document.getElementById("acct_current_password").value = "";
+  document.getElementById("acct_new_password").value = "";
+  document.getElementById("acct_new_password2").value = "";
+}
+
+document.addEventListener("DOMContentLoaded", checkAdminAuth);
+</script>
+</body>
+</html>
