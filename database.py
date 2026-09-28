@@ -221,6 +221,40 @@ def init_db():
     )
     """)
 
+    # ---- A/S전표 (수리 접수) ----
+    cur.execute("""
+    CREATE TABLE IF NOT EXISTS as_records (
+        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        customer_name TEXT,
+        phone1 TEXT,
+        phone2 TEXT,
+        receive_date TEXT NOT NULL,
+        contact_method TEXT,
+        mobile1 TEXT,
+        mobile2 TEXT,
+        finish_date TEXT,
+        delivery_method TEXT,
+        address TEXT,
+        brand TEXT,
+        product_name TEXT,
+        part_rim INTEGER,
+        part_bridge INTEGER,
+        part_temple INTEGER,
+        part_nosepad INTEGER,
+        part_etc INTEGER,
+        part_etc_detail TEXT,
+        content TEXT,
+        repair_type TEXT,
+        cash_receipt INTEGER,
+        deposit REAL,
+        balance REAL,
+        total REAL,
+        print_vendor INTEGER,
+        created_at TEXT,
+        store_id INTEGER
+    )
+    """)
+
     cur.execute("""
     CREATE TABLE IF NOT EXISTS general_sale_returns (
         id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -245,7 +279,7 @@ def init_db():
     #  새어나가는 사고를 막을 수 있음 - 자식 테이블에도 예외 없이 전부 추가)
     for table in (
         "customers", "exams", "sale_items", "visits", "returns", "settlements",
-        "general_sales", "general_sale_items", "general_sale_returns",
+        "general_sales", "general_sale_items", "general_sale_returns", "as_records",
     ):
         _migrate_add_column(cur, table, "store_id", "INTEGER")
 
@@ -265,7 +299,7 @@ def init_db():
         store_id = cur.lastrowid
         for table in (
             "customers", "exams", "sale_items", "visits", "returns", "settlements",
-            "general_sales", "general_sale_items", "general_sale_returns",
+            "general_sales", "general_sale_items", "general_sale_returns", "as_records",
         ):
             cur.execute(f"UPDATE {table} SET store_id = ? WHERE store_id IS NULL", (store_id,))
         conn.commit()

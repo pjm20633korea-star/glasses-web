@@ -91,6 +91,37 @@ class SettleIn(BaseModel):
     memo: Optional[str] = None
 
 
+class ASRecordIn(BaseModel):
+    customer_name: Optional[str] = None
+    phone1: Optional[str] = None
+    phone2: Optional[str] = None
+    receive_date: Optional[str] = None
+    contact_method: Optional[str] = None
+    mobile1: Optional[str] = None
+    mobile2: Optional[str] = None
+    finish_date: Optional[str] = None
+    delivery_method: Optional[str] = None
+    address: Optional[str] = None
+    brand: Optional[str] = None
+    product_name: Optional[str] = None
+    part_rim: Optional[bool] = False
+    part_bridge: Optional[bool] = False
+    part_temple: Optional[bool] = False
+    part_nosepad: Optional[bool] = False
+    part_etc: Optional[bool] = False
+    part_etc_detail: Optional[str] = None
+    content: Optional[str] = None
+    repair_type: Optional[str] = None
+    cash_receipt: Optional[bool] = False
+    deposit: Optional[float] = 0
+    balance: Optional[float] = 0
+    total: Optional[float] = 0
+    print_vendor: Optional[bool] = False
+
+
+AS_RECORD_FIELDS = [f for f in ASRecordIn.__fields__.keys() if f != "receive_date"]
+
+
 class ExamIn(BaseModel):
     exam_date: Optional[str] = None
     sale_type: Optional[str] = "exam"  # "exam"=검안매출(판매), "general"=일반판매
@@ -966,6 +997,102 @@ def delete_general_sale_return(gs_id: int, return_id: int, store: dict = Depends
         if row["store_id"] != store["id"]:
             raise HTTPException(status_code=403, detail="다른 매장의 기록은 삭제할 수 없습니다")
         conn.execute("DELETE FROM general_sale_returns WHERE id = ?", (return_id,))
+        conn.commit()
+        return {"ok": True}
+
+
+# ---------- A/S전표 API ----------
+# A/S 접수는 고객/비회원 어디에도 연결하지 않는 독립된 기록(as_records 테이블)로 저장됨
+
+@app.post("/api/as-records")
+def create_as_record(rec: ASRecordIn, store: dict = Depends(get_current_store)):
+    receive_date = rec.receive_date or date.today().isoformat()
+    with get_db() as conn:
+        data = rec.dict()
+        cols = ["receive_date", "created_at", "store_id"] + AS_RECORD_FIELDS
+        placeholders = ", ".join(["?"] * len(cols))
+        created_at = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+        values = [receive_date, created_at, store["id"]] + [data[f] for f in AS_RECORD_FIELDS]
+        cur = conn.execute(f"INSERT INTO as_records ({', '.join(cols)}) VALUES ({placeholders})", values)
+        conn.commit()
+        return {"id": cur.lastrowid}
+
+
+@app.get("/api/as-records")
+def list_as_records(search_type: Optional[str] = None, keyword: Optional[str] = None,
+                     date_type: Optional[str] = None, date_from: Optional[str] = None,
+                     date_to: Optional[str] = None, store: dict = Depends(get_current_store)):
+    group_ids = get_group_store_ids(store)
+    ph = _in_placeholders(group_ids)
+    query = f"SELECT * FROM as_records WHERE store_id IN ({ph})"
+    params: list = list(group_ids)
+
+    if keyword:
+        like = f"%{keyword}%"
+        if search_type == "고객번호":
+            query += " AND id = ?"
+            params.append(keyword)
+        elif search_type == "전화번호":
+            query += " AND (phone1 || phone2 LIKE ? OR mobile1 || mobile2 LIKE ?)"
+            params += [like, like]
+        else:
+            query += " AND customer_name LIKE ?"
+            params.append(like)
+
+    date_col = "finish_date" if date_type == "완성일자" else "receive_date"
+    if date_from:
+        query += f" AND {date_col} >= ?"
+        params.append(date_from)
+    if date_to:
+        query += f" AND {date_col} <= ?"
+        params.append(date_to)
+
+    query += " ORDER BY id DESC"
+    with get_db() as conn:
+        rows = conn.execute(query, params).fetchall()
+        return [dict(r) for r in rows]
+
+
+@app.get("/api/as-records/{as_id}")
+def get_as_record(as_id: int, store: dict = Depends(get_current_store)):
+    group_ids = get_group_store_ids(store)
+    ph = _in_placeholders(group_ids)
+    with get_db() as conn:
+        row = conn.execute(
+            f"SELECT * FROM as_records WHERE id = ? AND store_id IN ({ph})", (as_id, *group_ids)
+        ).fetchone()
+        if not row:
+            raise HTTPException(status_code=404, detail="A/S 기록을 찾을 수 없습니다")
+        return dict(row)
+
+
+@app.put("/api/as-records/{as_id}")
+def update_as_record(as_id: int, rec: ASRecordIn, store: dict = Depends(get_current_store)):
+    receive_date = rec.receive_date or date.today().isoformat()
+    with get_db() as conn:
+        owner = conn.execute("SELECT store_id FROM as_records WHERE id = ?", (as_id,)).fetchone()
+        if not owner:
+            raise HTTPException(status_code=404, detail="A/S 기록을 찾을 수 없습니다")
+        if owner["store_id"] != store["id"]:
+            raise HTTPException(status_code=403, detail="다른 매장의 기록은 수정할 수 없습니다")
+
+        data = rec.dict()
+        set_clause = ", ".join([f"{f}=?" for f in AS_RECORD_FIELDS])
+        values = [data[f] for f in AS_RECORD_FIELDS] + [receive_date, as_id]
+        conn.execute(f"UPDATE as_records SET {set_clause}, receive_date=? WHERE id=?", values)
+        conn.commit()
+        return {"id": as_id}
+
+
+@app.delete("/api/as-records/{as_id}")
+def delete_as_record(as_id: int, store: dict = Depends(get_current_store)):
+    with get_db() as conn:
+        owner = conn.execute("SELECT store_id FROM as_records WHERE id = ?", (as_id,)).fetchone()
+        if not owner:
+            raise HTTPException(status_code=404, detail="A/S 기록을 찾을 수 없습니다")
+        if owner["store_id"] != store["id"]:
+            raise HTTPException(status_code=403, detail="다른 매장의 기록은 삭제할 수 없습니다")
+        conn.execute("DELETE FROM as_records WHERE id = ?", (as_id,))
         conn.commit()
         return {"ok": True}
 

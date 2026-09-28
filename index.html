@@ -1525,6 +1525,8 @@ async function selectUnpaidStatusCustomer(customerId) {
   });
 }
 
+let asEditId = null; // null이면 새 A/S 접수, 값이 있으면 그 기록을 수정 중
+
 function openASModal() {
   document.getElementById("asModal").style.display = "flex";
   switchASTab("form");
@@ -1538,8 +1540,10 @@ function switchASTab(tab) {
   document.getElementById("asTab_list").classList.toggle("active", tab === "list");
   document.getElementById("asFormView").style.display = tab === "form" ? "" : "none";
   document.getElementById("asListView").style.display = tab === "list" ? "" : "none";
+  if (tab === "list") searchASList();
 }
 function resetASForm() {
+  asEditId = null;
   const today = todayStr();
   ["as_customer_name","as_phone1","as_phone2","as_mobile1","as_mobile2","as_address",
    "as_brand","as_product_name","as_part_etc_detail","as_content",
@@ -1557,14 +1561,119 @@ function updateASTotal() {
   const balance = Number(document.getElementById("as_balance").value) || 0;
   document.getElementById("as_total").value = deposit + balance;
 }
-function saveASForm() {
-  alert("A/S전표 저장 기능은 다음 단계에서 구현 예정입니다.");
+async function saveASForm() {
+  const payload = {
+    customer_name: document.getElementById("as_customer_name").value || null,
+    phone1: document.getElementById("as_phone1").value || null,
+    phone2: document.getElementById("as_phone2").value || null,
+    receive_date: document.getElementById("as_receive_date").value || todayStr(),
+    contact_method: document.querySelector('input[name="as_contact"]:checked').value,
+    mobile1: document.getElementById("as_mobile1").value || null,
+    mobile2: document.getElementById("as_mobile2").value || null,
+    finish_date: document.getElementById("as_finish_date").value || null,
+    delivery_method: document.querySelector('input[name="as_delivery"]:checked').value,
+    address: document.getElementById("as_address").value || null,
+    brand: document.getElementById("as_brand").value || null,
+    product_name: document.getElementById("as_product_name").value || null,
+    part_rim: document.getElementById("as_part_rim").checked,
+    part_bridge: document.getElementById("as_part_bridge").checked,
+    part_temple: document.getElementById("as_part_temple").checked,
+    part_nosepad: document.getElementById("as_part_nosepad").checked,
+    part_etc: document.getElementById("as_part_etc").checked,
+    part_etc_detail: document.getElementById("as_part_etc_detail").value || null,
+    content: document.getElementById("as_content").value || null,
+    repair_type: document.querySelector('input[name="as_repair_type"]:checked').value,
+    cash_receipt: document.getElementById("as_cash_receipt").checked,
+    deposit: numOrNull(document.getElementById("as_deposit").value) || 0,
+    balance: numOrNull(document.getElementById("as_balance").value) || 0,
+    total: numOrNull(document.getElementById("as_total").value) || 0,
+    print_vendor: document.getElementById("as_print_vendor").checked,
+  };
+
+  const url = asEditId ? `/api/as-records/${asEditId}` : "/api/as-records";
+  const method = asEditId ? "PUT" : "POST";
+  const res = await fetch(url, {
+    method, headers: {"Content-Type": "application/json"}, body: JSON.stringify(payload),
+  });
+  if (!res.ok) {
+    let detail = "";
+    try { detail = (await res.json()).detail || ""; } catch (e) { /* 무시 */ }
+    alert("저장 중 오류가 발생했습니다." + (detail ? "\n\n" + detail : ""));
+    return;
+  }
+  const data = await res.json();
+  asEditId = data.id;
+  alert("저장되었습니다!");
 }
 function printASForm() {
   alert("인쇄 기능은 다음 단계에서 구현 예정입니다.");
 }
-function searchASList() {
-  alert("A/S 검색 기능은 다음 단계에서 구현 예정입니다.");
+async function searchASList() {
+  const params = new URLSearchParams();
+  const keyword = document.getElementById("as_search_keyword").value.trim();
+  if (keyword) {
+    params.set("search_type", document.getElementById("as_search_type").value);
+    params.set("keyword", keyword);
+  }
+  const dateFrom = document.getElementById("as_search_from").value;
+  const dateTo = document.getElementById("as_search_to").value;
+  if (dateFrom || dateTo) {
+    params.set("date_type", document.getElementById("as_search_date_type").value);
+    if (dateFrom) params.set("date_from", dateFrom);
+    if (dateTo) params.set("date_to", dateTo);
+  }
+
+  const res = await fetch(`/api/as-records?${params.toString()}`);
+  const rows = res.ok ? await res.json() : [];
+  const tbody = document.getElementById("asListBody");
+  tbody.innerHTML = "";
+  if (rows.length === 0) {
+    tbody.innerHTML = '<tr><td colspan="7" class="as-list-empty-rows">검색 결과가 없습니다</td></tr>';
+    return;
+  }
+  rows.forEach(r => {
+    const tr = document.createElement("tr");
+    tr.style.cursor = "pointer";
+    tr.innerHTML = `
+      <td>${r.id}</td>
+      <td>${r.receive_date || ""}</td>
+      <td>${r.finish_date || ""}</td>
+      <td>${r.customer_name || ""}</td>
+      <td>${[r.phone1, r.phone2].filter(Boolean).join("-")}</td>
+      <td>${[r.mobile1, r.mobile2].filter(Boolean).join("-")}</td>
+      <td>${r.content || ""}</td>`;
+    tr.onclick = () => loadASRecordIntoForm(r);
+    tbody.appendChild(tr);
+  });
+}
+function loadASRecordIntoForm(r) {
+  asEditId = r.id;
+  document.getElementById("as_customer_name").value = r.customer_name || "";
+  document.getElementById("as_phone1").value = r.phone1 || "";
+  document.getElementById("as_phone2").value = r.phone2 || "";
+  document.getElementById("as_receive_date").value = r.receive_date || "";
+  document.querySelector(`input[name="as_contact"][value="${r.contact_method || "문자"}"]`).checked = true;
+  document.getElementById("as_mobile1").value = r.mobile1 || "";
+  document.getElementById("as_mobile2").value = r.mobile2 || "";
+  document.getElementById("as_finish_date").value = r.finish_date || "";
+  document.querySelector(`input[name="as_delivery"][value="${r.delivery_method || "방문"}"]`).checked = true;
+  document.getElementById("as_address").value = r.address || "";
+  document.getElementById("as_brand").value = r.brand || "";
+  document.getElementById("as_product_name").value = r.product_name || "";
+  document.getElementById("as_part_rim").checked = !!r.part_rim;
+  document.getElementById("as_part_bridge").checked = !!r.part_bridge;
+  document.getElementById("as_part_temple").checked = !!r.part_temple;
+  document.getElementById("as_part_nosepad").checked = !!r.part_nosepad;
+  document.getElementById("as_part_etc").checked = !!r.part_etc;
+  document.getElementById("as_part_etc_detail").value = r.part_etc_detail || "";
+  document.getElementById("as_content").value = r.content || "";
+  document.querySelector(`input[name="as_repair_type"][value="${r.repair_type || "보증수리"}"]`).checked = true;
+  document.getElementById("as_cash_receipt").checked = !!r.cash_receipt;
+  document.getElementById("as_deposit").value = r.deposit || "";
+  document.getElementById("as_balance").value = r.balance || "";
+  document.getElementById("as_total").value = r.total || "";
+  document.getElementById("as_print_vendor").checked = !!r.print_vendor;
+  switchASTab("form");
 }
 
 /* ================= 일반판매 =================
