@@ -671,14 +671,29 @@
       <div id="acctMsg" style="font-size:12px; margin-top:10px; display:none;"></div>
     </div>
 
-    <div class="as-body" id="settingsView_backup" style="display:none;">
-      <p style="font-size:11px; color:#888; margin:0 0 10px;">
-        고객정보를 포함한 전체 데이터를 지금 바로 백업합니다. (매일 한 번 자동으로도 백업됩니다)
-      </p>
-      <button id="settingsBackupBtn" class="btn-secondary" style="width:100%;" onclick="createBackup(this)">💾 지금 백업하기</button>
+    <div class="as-body" id="settingsView_backup" style="display:none; max-height:65vh; overflow-y:auto;">
+      <div id="gdriveStatusBox" style="font-size:10px; padding:6px 8px; border-radius:4px; margin-bottom:12px;"></div>
 
-      <div style="font-size:11px; color:#555; font-weight:bold; margin:16px 0 4px;">최근 백업 목록</div>
-      <div id="backupListBox" style="max-height:220px; overflow-y:auto; border:1px solid #dde1e8; border-radius:4px;"></div>
+      <div style="font-size:11px; font-weight:bold; color:#2b3a55; margin-bottom:4px;">💾 내 매장 백업</div>
+      <p style="font-size:10px; color:#888; margin:0 0 8px;">
+        이 매장의 고객·검안·매출·반품·미수·A/S 데이터만 백업합니다. 매일 한 번 자동으로도 백업되고,
+        구글드라이브가 연동되어 있으면 거기에도 함께 저장됩니다.
+      </p>
+      <button id="myBackupBtn" class="btn-secondary" style="width:100%;" onclick="createMyBackup(this)">💾 지금 내 매장 백업하기</button>
+      <div id="myBackupListBox" style="max-height:170px; overflow-y:auto; border:1px solid #dde1e8; border-radius:4px; margin-top:8px;"></div>
+
+      <div id="adminBackupSection" style="display:none; margin-top:18px; padding-top:14px; border-top:1px solid #e5e5e5;">
+        <div style="font-size:11px; font-weight:bold; color:#b23a48; margin-bottom:6px;">🛠 전체 관리 (관리자 전용)</div>
+
+        <label style="margin-top:0;">매장 선택</label>
+        <select id="adminBackupStoreSelect" onchange="loadAdminStoreBackups()"></select>
+        <button class="btn-secondary" style="width:100%; margin-top:6px;" onclick="createAdminStoreBackup()">선택한 매장 지금 백업</button>
+        <div id="adminStoreBackupListBox" style="max-height:140px; overflow-y:auto; border:1px solid #dde1e8; border-radius:4px; margin-top:6px;"></div>
+
+        <div style="font-size:11px; font-weight:bold; color:#555; margin:16px 0 4px;">전체 시스템 백업 (모든 매장 데이터를 한 파일로)</div>
+        <button class="btn-secondary" style="width:100%;" onclick="createFullBackup(this)">💾 지금 전체 백업하기</button>
+        <div id="fullBackupListBox" style="max-height:140px; overflow-y:auto; border:1px solid #dde1e8; border-radius:4px; margin-top:8px;"></div>
+      </div>
     </div>
   </div>
 </div>
@@ -1343,8 +1358,6 @@ function openSettingsModal() {
   document.getElementById("acct_new_password").value = "";
   document.getElementById("acct_new_password2").value = "";
   document.getElementById("acctMsg").style.display = "none";
-  // 백업은 모든 매장의 데이터가 한 파일에 담기므로 관리자만 볼 수 있게 탭 자체를 숨김
-  document.getElementById("settingsTab_backup").style.display = currentStoreInfo.is_admin ? "" : "none";
   switchSettingsTab("account");
   document.getElementById("settingsModal").style.display = "flex";
 }
@@ -1358,7 +1371,7 @@ function switchSettingsTab(tab) {
     document.getElementById(`settingsTab_${t}`).classList.toggle("active", t === tab);
     document.getElementById(`settingsView_${t}`).style.display = t === tab ? "" : "none";
   });
-  if (tab === "backup") loadBackupList();
+  if (tab === "backup") loadBackupTab();
 }
 
 /* ================= 채팅 알림 (소리 + 데스크탑 알림) =================
@@ -1851,44 +1864,177 @@ async function changePasswordAction() {
 
 // 지금 이 순간의 전체 데이터(고객/검안/매출/반품/미수 등 전부)를 backups 폴더에 스냅샷으로 저장함
 // (앱을 하루 만에 한 번씩은 자동으로도 백업하지만, 중요한 작업 전후에는 이 버튼으로 바로 백업해두면 안전함)
-async function createBackup(btn) {
-  if (btn) { btn.disabled = true; btn.textContent = "백업 중..."; }
-  try {
-    const res = await fetch("/api/backup", { method: "POST" });
-    if (!res.ok) { alert("백업 중 오류가 발생했습니다."); return; }
-    const data = await res.json();
-    const sizeKb = Math.round(data.size / 1024).toLocaleString();
-    alert(`백업이 완료되었습니다!\n\n파일: backups\\${data.filename}\n크기: ${sizeKb} KB\n\n(optical_app 폴더 안의 backups 폴더에 저장됩니다. 더 안전하게 보관하려면 이 폴더를 USB나 다른 저장소에도 복사해 두세요.)`);
-    loadBackupList();
-  } finally {
-    if (btn) { btn.disabled = false; btn.textContent = "💾 지금 백업하기"; }
+/* ================= 백업 탭 =================
+   "내 매장 백업"은 모든 매장이 자기 데이터만 백업/복구할 수 있음. "전체 관리"는 관리자에게만 보이고
+   다른 매장 백업을 골라서 보거나, 모든 매장이 들어있는 전체 시스템 백업을 다룰 수 있음 */
+const BACKUP_KIND_LABEL = { manual: "수동", auto: "자동", presave: "복구직전" };
+const BACKUP_KIND_COLOR = { manual: "#dbe6ff", auto: "#eef1f6", presave: "#ffe3e6" };
+
+async function loadBackupTab() {
+  loadGdriveStatus();
+  loadMyBackups();
+  document.getElementById("adminBackupSection").style.display = currentStoreInfo.is_admin ? "" : "none";
+  if (currentStoreInfo.is_admin) {
+    loadAdminStoreOptions();
+    loadFullBackups();
   }
 }
 
-async function loadBackupList() {
-  const box = document.getElementById("backupListBox");
-  box.innerHTML = '<div style="padding:10px; font-size:11px; color:#99a;">불러오는 중...</div>';
-  const res = await fetch("/api/backups");
-  if (!res.ok) {
-    box.innerHTML = '<div style="padding:10px; font-size:11px; color:#99a;">목록을 불러올 수 없습니다.</div>';
-    return;
-  }
-  const backups = await res.json();
+async function loadGdriveStatus() {
+  const box = document.getElementById("gdriveStatusBox");
+  try {
+    const res = await fetch("/api/backup/gdrive-status");
+    const data = await res.json();
+    if (data.configured) {
+      box.style.background = "#e8f5e9"; box.style.color = "#2e7d32";
+      box.textContent = "☁️ 구글드라이브 연동됨 - 백업이 로컬과 구글드라이브에 함께 저장됩니다.";
+    } else {
+      box.style.background = "#fff3e0"; box.style.color = "#b23a00";
+      box.textContent = "☁️ 구글드라이브 미연동 - 지금은 로컬에만 백업됩니다.";
+    }
+  } catch (e) { box.textContent = ""; }
+}
+
+function renderBackupRows(containerId, backups, onRestoreFnName) {
+  const box = document.getElementById(containerId);
   if (backups.length === 0) {
     box.innerHTML = '<div style="padding:10px; font-size:11px; color:#99a;">아직 백업이 없습니다.</div>';
     return;
   }
   box.innerHTML = backups.map(b => `
-    <div style="display:flex; justify-content:space-between; align-items:center; gap:8px; padding:6px 10px; border-bottom:1px solid #eee; font-size:11px;">
+    <div style="display:flex; justify-content:space-between; align-items:center; gap:6px; padding:6px 10px; border-bottom:1px solid #eee; font-size:11px;">
       <div style="overflow:hidden; text-overflow:ellipsis; white-space:nowrap;">
-        <span style="display:inline-block; min-width:34px; padding:1px 5px; border-radius:3px; font-size:9px; font-weight:bold;
-                     background:${b.kind === "manual" ? "#dbe6ff" : "#eef1f6"}; color:${b.kind === "manual" ? "#2b3a55" : "#667"};">
-          ${b.kind === "manual" ? "수동" : "자동"}
-        </span>
+        <span style="display:inline-block; min-width:30px; padding:1px 5px; border-radius:3px; font-size:9px; font-weight:bold; color:#445;
+                     background:${BACKUP_KIND_COLOR[b.kind] || "#eef1f6"};">${BACKUP_KIND_LABEL[b.kind] || b.kind}</span>
         <span style="margin-left:6px; color:#555;">${b.created_at}</span>
+        <span style="margin-left:6px; color:#99a;">${formatFileSize(b.size)}</span>
       </div>
-      <div style="flex-shrink:0; color:#99a;">${formatFileSize(b.size)}</div>
+      <button class="btn-secondary" style="flex-shrink:0; padding:3px 8px; font-size:10px;"
+              onclick="${onRestoreFnName}('${b.filename}')">복구</button>
     </div>`).join("");
+}
+
+/* ---- 내 매장 백업 (모든 매장 공통) ---- */
+async function createMyBackup(btn) {
+  if (btn) { btn.disabled = true; btn.textContent = "백업 중..."; }
+  try {
+    const res = await fetch("/api/backup/mine", { method: "POST" });
+    if (!res.ok) { alert("백업 중 오류가 발생했습니다."); return; }
+    const data = await res.json();
+    alert(`백업이 완료되었습니다!\n\n파일: ${data.filename}\n크기: ${formatFileSize(data.size)}` +
+          (data.gdrive_uploaded ? "\n☁️ 구글드라이브에도 저장되었습니다." : "\n(로컬에만 저장됨 - 구글드라이브 미연동)"));
+    loadMyBackups();
+  } finally {
+    if (btn) { btn.disabled = false; btn.textContent = "💾 지금 내 매장 백업하기"; }
+  }
+}
+
+async function loadMyBackups() {
+  const res = await fetch("/api/backup/mine");
+  renderBackupRows("myBackupListBox", res.ok ? await res.json() : [], "restoreMyBackup");
+}
+
+async function restoreMyBackup(filename) {
+  const ok = confirm(
+    `이 백업(${filename}) 시점으로 되돌리시겠습니까?\n\n` +
+    "지금 저장되어 있는 이 매장의 고객/검안/매출 등 데이터가 모두 이 백업 내용으로 바뀝니다.\n" +
+    "(되돌리기 직전 상태도 자동으로 한 번 더 백업해 두니, 실수하셨다면 방금 생긴 '복구직전' 백업으로 다시 되돌리실 수 있습니다)"
+  );
+  if (!ok) return;
+  const res = await fetch("/api/backup/mine/restore", {
+    method: "POST", headers: {"Content-Type": "application/json"}, body: JSON.stringify({ filename }),
+  });
+  if (!res.ok) {
+    const data = await res.json().catch(() => ({}));
+    alert(data.detail || "복구 중 오류가 발생했습니다.");
+    return;
+  }
+  alert("복구가 완료되었습니다. 화면을 새로고침합니다.");
+  location.reload();
+}
+
+/* ---- 전체 관리 (관리자 전용) ---- */
+async function loadAdminStoreOptions() {
+  const select = document.getElementById("adminBackupStoreSelect");
+  const res = await fetch("/api/admin/backups/stores");
+  if (!res.ok) return;
+  const summaries = await res.json();
+  const prevValue = select.value;
+  select.innerHTML = summaries.map(s =>
+    `<option value="${s.store_id}">${escapeHtml(s.store_name)} (백업 ${s.backup_count}개)</option>`
+  ).join("");
+  select.value = summaries.some(s => String(s.store_id) === prevValue) ? prevValue : (summaries[0] ? summaries[0].store_id : "");
+  loadAdminStoreBackups();
+}
+
+async function loadAdminStoreBackups() {
+  const storeId = document.getElementById("adminBackupStoreSelect").value;
+  if (!storeId) { document.getElementById("adminStoreBackupListBox").innerHTML = ""; return; }
+  const res = await fetch(`/api/admin/backups/stores/${storeId}`);
+  renderBackupRows("adminStoreBackupListBox", res.ok ? await res.json() : [], "restoreAdminStoreBackup");
+}
+
+async function createAdminStoreBackup() {
+  const storeId = document.getElementById("adminBackupStoreSelect").value;
+  if (!storeId) return;
+  const res = await fetch(`/api/admin/backups/stores/${storeId}`, { method: "POST" });
+  if (!res.ok) { alert("백업 중 오류가 발생했습니다."); return; }
+  await loadAdminStoreOptions();
+}
+
+async function restoreAdminStoreBackup(filename) {
+  const storeId = document.getElementById("adminBackupStoreSelect").value;
+  const storeName = document.getElementById("adminBackupStoreSelect").selectedOptions[0]?.textContent || "이 매장";
+  const ok = confirm(`${storeName}을(를) 이 백업(${filename}) 시점으로 되돌리시겠습니까?\n\n그 매장의 현재 데이터가 모두 바뀝니다.`);
+  if (!ok) return;
+  const res = await fetch(`/api/admin/backups/stores/${storeId}/restore`, {
+    method: "POST", headers: {"Content-Type": "application/json"}, body: JSON.stringify({ filename }),
+  });
+  if (!res.ok) {
+    const data = await res.json().catch(() => ({}));
+    alert(data.detail || "복구 중 오류가 발생했습니다.");
+    return;
+  }
+  alert("복구가 완료되었습니다. 화면을 새로고침합니다.");
+  location.reload();
+}
+
+async function createFullBackup(btn) {
+  if (btn) { btn.disabled = true; btn.textContent = "백업 중..."; }
+  try {
+    const res = await fetch("/api/backup", { method: "POST" });
+    if (!res.ok) { alert("백업 중 오류가 발생했습니다."); return; }
+    const data = await res.json();
+    alert(`전체 백업이 완료되었습니다!\n\n파일: backups\\${data.filename}\n크기: ${formatFileSize(data.size)}` +
+          (data.gdrive_uploaded ? "\n☁️ 구글드라이브에도 저장되었습니다." : "\n(로컬에만 저장됨 - 구글드라이브 미연동)"));
+    loadFullBackups();
+  } finally {
+    if (btn) { btn.disabled = false; btn.textContent = "💾 지금 전체 백업하기"; }
+  }
+}
+
+async function loadFullBackups() {
+  const res = await fetch("/api/backups");
+  renderBackupRows("fullBackupListBox", res.ok ? await res.json() : [], "restoreFullBackup");
+}
+
+async function restoreFullBackup(filename) {
+  const ok = confirm(
+    `⚠️ 전체 시스템을 이 백업(${filename}) 시점으로 되돌리시겠습니까?\n\n` +
+    "이건 모든 매장의 데이터에 영향을 줍니다 - 지금 저장되어 있는 모든 매장의 데이터가 전부 이 백업 내용으로 바뀝니다.\n" +
+    "(되돌리기 직전 상태도 전체 백업으로 한 번 더 자동 저장해 둡니다)"
+  );
+  if (!ok) return;
+  const res = await fetch("/api/admin/backup/restore", {
+    method: "POST", headers: {"Content-Type": "application/json"}, body: JSON.stringify({ filename }),
+  });
+  if (!res.ok) {
+    const data = await res.json().catch(() => ({}));
+    alert(data.detail || "복구 중 오류가 발생했습니다.");
+    return;
+  }
+  alert("전체 복구가 완료되었습니다. 화면을 새로고침합니다.");
+  location.reload();
 }
 
 // 검안매출/매출현황/미수금현황을 브라우저 탭처럼 취급함: 한 번 열면 위쪽 탭줄에 탭이 생기고,

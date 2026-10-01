@@ -3,8 +3,10 @@
 실행: uvicorn main:app --reload
 접속: http://localhost:8000
 """
+import asyncio
 import json
 import os
+import shutil
 import time
 import urllib.error
 import urllib.parse
@@ -294,6 +296,60 @@ def _in_placeholders(ids: List[int]) -> str:
 # SQLite가 공식으로 제공하는 VACUUM INTO로 항상 손상 없는 완전한 스냅샷을 떠서 backups 폴더에 저장함
 BACKUP_DIR = Path("backups")
 
+# 매장별 백업(JSON)에 포함되는 테이블 - 그 매장 소유 데이터가 들어있는 테이블 전부.
+# admin_delete_store에서 "매장 삭제 전 데이터가 남아있는지" 검사할 때도 이 목록을 그대로 재사용함
+STORE_BACKUP_TABLES = [
+    "customers", "exams", "sale_items", "visits", "returns", "settlements",
+    "general_sales", "general_sale_items", "general_sale_returns", "as_records",
+]
+
+# ---------- 구글 드라이브 백업 업로드 (선택사항) ----------
+# 로컬 백업은 항상 먼저 끝내고, 구글 드라이브 업로드는 "추가 보관"으로만 시도함 -
+# 연동이 안 되어 있거나 업로드가 실패해도 로컬 백업/복구 기능 자체에는 전혀 영향 없음.
+#   GDRIVE_SERVICE_ACCOUNT_FILE - 구글 클라우드 콘솔에서 발급받은 서비스 계정 키(JSON) 파일 경로
+#   GDRIVE_FOLDER_ID            - 그 서비스 계정 이메일을 "편집자"로 공유해 둔 구글 드라이브 폴더 ID
+GDRIVE_SERVICE_ACCOUNT_FILE = os.environ.get("GDRIVE_SERVICE_ACCOUNT_FILE", "")
+GDRIVE_FOLDER_ID = os.environ.get("GDRIVE_FOLDER_ID", "")
+_gdrive_service = None
+
+
+def _gdrive_configured() -> bool:
+    return bool(GDRIVE_SERVICE_ACCOUNT_FILE and GDRIVE_FOLDER_ID)
+
+
+def _get_gdrive_service():
+    global _gdrive_service
+    if not _gdrive_configured():
+        return None
+    if _gdrive_service is not None:
+        return _gdrive_service
+    try:
+        from google.oauth2 import service_account
+        from googleapiclient.discovery import build
+        creds = service_account.Credentials.from_service_account_file(
+            GDRIVE_SERVICE_ACCOUNT_FILE, scopes=["https://www.googleapis.com/auth/drive.file"],
+        )
+        _gdrive_service = build("drive", "v3", credentials=creds, cache_discovery=False)
+        return _gdrive_service
+    except Exception as e:
+        print(f"[구글드라이브 연동 실패 - 로컬 백업은 계속 진행] {e}")
+        return None
+
+
+def _gdrive_upload(local_path: Path, remote_name: str) -> dict:
+    service = _get_gdrive_service()
+    if not service:
+        return {"uploaded": False, "reason": "not_configured"}
+    try:
+        from googleapiclient.http import MediaFileUpload
+        metadata = {"name": remote_name, "parents": [GDRIVE_FOLDER_ID]}
+        media = MediaFileUpload(str(local_path), resumable=False)
+        service.files().create(body=metadata, media_body=media, fields="id").execute()
+        return {"uploaded": True, "reason": None}
+    except Exception as e:
+        print(f"[구글드라이브 업로드 실패 - 로컬 백업은 유지됨] {e}")
+        return {"uploaded": False, "reason": str(e)}
+
 # ---------- 채팅 사진/파일 첨부 ----------
 CHAT_UPLOAD_DIR = Path("chat_uploads")
 CHAT_UPLOAD_MAX_SIZE = 10 * 1024 * 1024  # 10MB
@@ -350,14 +406,17 @@ def _normalize_phone(phone: str) -> str:
     return "".join(ch for ch in phone if ch.isdigit())
 
 
-def _do_backup(prefix: str) -> tuple[str, int]:
+def _do_backup(prefix: str) -> tuple[str, int, dict]:
+    """전체(모든 매장) DB 스냅샷. 관리자용 - 재해복구(서버 전체를 통째로 되돌릴 때) 목적"""
     BACKUP_DIR.mkdir(exist_ok=True)
     timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
     filename = f"optical_backup_{prefix}_{timestamp}.db"
     backup_path = BACKUP_DIR / filename
     with get_db() as conn:
         conn.execute(f"VACUUM INTO '{backup_path.as_posix()}'")
-    return filename, backup_path.stat().st_size
+    size = backup_path.stat().st_size
+    gdrive = _gdrive_upload(backup_path, f"full/{filename}")
+    return filename, size, gdrive
 
 
 def _prune_auto_backups(keep: int = 30):
@@ -367,12 +426,133 @@ def _prune_auto_backups(keep: int = 30):
         old.unlink(missing_ok=True)
 
 
+def _store_backup_dir(store_id: int) -> Path:
+    d = BACKUP_DIR / f"store_{store_id}"
+    d.mkdir(parents=True, exist_ok=True)
+    return d
+
+
+def _export_store_tables(conn, store_id: int) -> dict:
+    return {
+        table: [dict(r) for r in conn.execute(f"SELECT * FROM {table} WHERE store_id = ?", (store_id,)).fetchall()]
+        for table in STORE_BACKUP_TABLES
+    }
+
+
+def _do_store_backup(store_id: int, prefix: str) -> tuple[str, int, dict]:
+    """이 매장 소유 데이터(고객/검안/매출/반품/미수/A·S 등)만 JSON으로 내보냄 - 매장 스스로 백업/복구할 수 있는 단위"""
+    store_dir = _store_backup_dir(store_id)
+    timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+    filename = f"store_{store_id}_{prefix}_{timestamp}.json"
+    path = store_dir / filename
+    with get_db() as conn:
+        store_row = conn.execute("SELECT name FROM stores WHERE id = ?", (store_id,)).fetchone()
+        payload = {
+            "store_id": store_id,
+            "store_name": store_row["name"] if store_row else None,
+            "exported_at": datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
+            "tables": _export_store_tables(conn, store_id),
+        }
+    path.write_text(json.dumps(payload, ensure_ascii=False), encoding="utf-8")
+    size = path.stat().st_size
+    gdrive = _gdrive_upload(path, f"stores/store_{store_id}/{filename}")
+    return filename, size, gdrive
+
+
+def _prune_store_auto_backups(store_id: int, keep: int = 30):
+    store_dir = _store_backup_dir(store_id)
+    autos = sorted(store_dir.glob(f"store_{store_id}_auto_*.json"), key=lambda p: p.stat().st_mtime, reverse=True)
+    for old in autos[keep:]:
+        old.unlink(missing_ok=True)
+
+
+def _list_store_backups(store_id: int) -> list:
+    store_dir = _store_backup_dir(store_id)
+    files = sorted(store_dir.glob(f"store_{store_id}_*.json"), key=lambda p: p.stat().st_mtime, reverse=True)
+    result = []
+    for f in files:
+        # 파일명 형식: store_<id>_<kind>_<timestamp>.json
+        kind = f.stem.split("_")[2] if len(f.stem.split("_")) > 2 else "manual"
+        result.append({
+            "filename": f.name,
+            "size": f.stat().st_size,
+            "created_at": datetime.fromtimestamp(f.stat().st_mtime).strftime("%Y-%m-%d %H:%M:%S"),
+            "kind": kind,  # manual / auto / presave(복구 직전 자동 안전백업)
+        })
+    return result
+
+
+def _insert_rows(conn, table: str, rows: list):
+    if not rows:
+        return
+    cols = list(rows[0].keys())
+    col_list = ", ".join(cols)
+    placeholders = ", ".join(["?"] * len(cols))
+    conn.executemany(
+        f"INSERT INTO {table} ({col_list}) VALUES ({placeholders})",
+        [tuple(r.get(c) for c in cols) for r in rows],
+    )
+
+
+def _restore_store_data(store_id: int, filename: str):
+    """백업 시점의 이 매장 데이터로 완전히 대체함(지금 있는 데이터는 지워짐) - 되돌리기 전에
+    지금 상태도 자동으로 한 번 더 백업해 둬서, 복구를 잘못 눌러도 그 직전 상태로 다시 돌아갈 수 있게 함"""
+    safe_name = Path(filename).name
+    if not safe_name.startswith(f"store_{store_id}_"):
+        raise HTTPException(status_code=400, detail="이 매장의 백업 파일이 아닙니다")
+    path = _store_backup_dir(store_id) / safe_name
+    if not path.exists():
+        raise HTTPException(status_code=404, detail="백업 파일을 찾을 수 없습니다")
+    try:
+        payload = json.loads(path.read_text(encoding="utf-8"))
+    except Exception:
+        raise HTTPException(status_code=400, detail="백업 파일을 읽을 수 없습니다")
+
+    _do_store_backup(store_id, "presave")
+
+    tables = payload.get("tables", {})
+    with get_db() as conn:
+        for table in STORE_BACKUP_TABLES:
+            conn.execute(f"DELETE FROM {table} WHERE store_id = ?", (store_id,))
+        for table in STORE_BACKUP_TABLES:
+            _insert_rows(conn, table, tables.get(table) or [])
+        conn.commit()
+
+
+class StoreBackupRestoreIn(BaseModel):
+    filename: str
+
+
+@app.post("/api/backup/mine")
+def create_my_backup(store: dict = Depends(get_current_store)):
+    """로그인한 매장이 스스로 자기 데이터만 백업함 (관리자가 아니어도 가능)"""
+    filename, size, gdrive = _do_store_backup(store["id"], "manual")
+    _prune_store_auto_backups(store["id"])
+    return {"filename": filename, "size": size, "gdrive_uploaded": gdrive["uploaded"]}
+
+
+@app.get("/api/backup/mine")
+def list_my_backups(store: dict = Depends(get_current_store)):
+    return _list_store_backups(store["id"])
+
+
+@app.post("/api/backup/mine/restore")
+def restore_my_backup(body: StoreBackupRestoreIn, store: dict = Depends(get_current_store)):
+    _restore_store_data(store["id"], body.filename)
+    return {"ok": True}
+
+
+@app.get("/api/backup/gdrive-status")
+def backup_gdrive_status(store: dict = Depends(get_current_store)):
+    return {"configured": _gdrive_configured()}
+
+
 @app.post("/api/backup")
 def create_backup(admin: dict = Depends(require_admin)):
     """지금 이 순간 전체 데이터(모든 매장의 고객/검안/매출/반품/미수 등 전부)의 스냅샷을 backups 폴더에 저장함
     (여러 매장 데이터가 한 파일에 다 들어있으므로 관리자만 실행할 수 있음)"""
-    filename, size = _do_backup("manual")
-    return {"filename": filename, "size": size}
+    filename, size, gdrive = _do_backup("manual")
+    return {"filename": filename, "size": size, "gdrive_uploaded": gdrive["uploaded"]}
 
 
 @app.get("/api/backups")
@@ -391,22 +571,100 @@ def list_backups(admin: dict = Depends(require_admin)):
     ]
 
 
-# ---------- 시작 시 DB 초기화 + 하루 한 번 자동 백업 ----------
+@app.post("/api/admin/backup/restore")
+def admin_restore_full_backup(body: StoreBackupRestoreIn, admin: dict = Depends(require_admin)):
+    """전체(모든 매장) DB를 통째로 백업 시점으로 되돌림 - 가장 파급력이 큰 되돌리기라 관리자만 가능하고,
+    되돌리기 전 지금 상태도 안전백업으로 한 번 더 남겨둠"""
+    safe_name = Path(body.filename).name
+    backup_path = BACKUP_DIR / safe_name
+    if not safe_name.startswith("optical_backup_") or not backup_path.exists():
+        raise HTTPException(status_code=404, detail="백업 파일을 찾을 수 없습니다")
+    _do_backup("presave")
+    shutil.copy(backup_path, DB_PATH)
+    return {"ok": True}
 
-@app.on_event("startup")
-def on_startup():
-    init_db()
+
+@app.get("/api/admin/backups/stores")
+def admin_list_store_backup_summary(admin: dict = Depends(require_admin)):
+    """관리자가 매장을 고를 수 있도록, 매장별 백업 개수/최신 백업 정보를 간단히 모아서 보여줌"""
+    with get_db() as conn:
+        stores = conn.execute("SELECT id, name FROM stores ORDER BY id").fetchall()
+    result = []
+    for s in stores:
+        backups = _list_store_backups(s["id"])
+        result.append({
+            "store_id": s["id"], "store_name": s["name"],
+            "backup_count": len(backups),
+            "latest": backups[0] if backups else None,
+        })
+    return result
+
+
+@app.get("/api/admin/backups/stores/{store_id}")
+def admin_list_store_backups(store_id: int, admin: dict = Depends(require_admin)):
+    return _list_store_backups(store_id)
+
+
+@app.post("/api/admin/backups/stores/{store_id}")
+def admin_create_store_backup(store_id: int, admin: dict = Depends(require_admin)):
+    with get_db() as conn:
+        if not conn.execute("SELECT id FROM stores WHERE id = ?", (store_id,)).fetchone():
+            raise HTTPException(status_code=404, detail="매장을 찾을 수 없습니다")
+    filename, size, gdrive = _do_store_backup(store_id, "manual")
+    _prune_store_auto_backups(store_id)
+    return {"filename": filename, "size": size, "gdrive_uploaded": gdrive["uploaded"]}
+
+
+@app.post("/api/admin/backups/stores/{store_id}/restore")
+def admin_restore_store_backup(store_id: int, body: StoreBackupRestoreIn, admin: dict = Depends(require_admin)):
+    _restore_store_data(store_id, body.filename)
+    return {"ok": True}
+
+
+# ---------- 시작 시 DB 초기화 + 하루 한 번 자동 백업(전체 + 매장별) ----------
+# 서버를 재시작할 때 한 번 확인하는 것 외에도, 켜놓은 채로 오래 두는 경우를 위해 1시간마다
+# 다시 확인하는 백그라운드 작업을 같이 돌림(실제 백업은 각자 마지막 자동백업 후 20시간이 지났을 때만 실행됨)
+
+def _run_due_auto_backups():
     try:
         BACKUP_DIR.mkdir(exist_ok=True)
         autos = list(BACKUP_DIR.glob("optical_backup_auto_*.db"))
         latest_age_hours = (
             (time.time() - max(p.stat().st_mtime for p in autos)) / 3600 if autos else 999
         )
-        if latest_age_hours >= 20:  # 서버를 자주 재시작해도 하루 한 번 정도만 자동 백업함
+        if latest_age_hours >= 20:
             _do_backup("auto")
             _prune_auto_backups()
     except Exception as e:
-        print(f"[자동 백업 실패 - 무시하고 계속 진행] {e}")
+        print(f"[전체 자동 백업 실패 - 무시하고 계속 진행] {e}")
+
+    try:
+        with get_db() as conn:
+            store_ids = [r["id"] for r in conn.execute("SELECT id FROM stores").fetchall()]
+        for sid in store_ids:
+            store_dir = _store_backup_dir(sid)
+            autos = list(store_dir.glob(f"store_{sid}_auto_*.json"))
+            latest_age_hours = (
+                (time.time() - max(p.stat().st_mtime for p in autos)) / 3600 if autos else 999
+            )
+            if latest_age_hours >= 20:
+                _do_store_backup(sid, "auto")
+                _prune_store_auto_backups(sid)
+    except Exception as e:
+        print(f"[매장별 자동 백업 실패 - 무시하고 계속 진행] {e}")
+
+
+async def _auto_backup_scheduler_loop():
+    while True:
+        await asyncio.sleep(3600)
+        _run_due_auto_backups()
+
+
+@app.on_event("startup")
+def on_startup():
+    init_db()
+    _run_due_auto_backups()
+    asyncio.create_task(_auto_backup_scheduler_loop())
 
 
 # ---------- 매장 로그인 / 인증 ----------
@@ -593,10 +851,7 @@ def admin_update_store(store_id: int, body: StoreUpdateIn, admin: dict = Depends
         return {"ok": True}
 
 
-DATA_TABLES_FOR_STORE = [
-    "customers", "exams", "sale_items", "visits", "returns", "settlements",
-    "general_sales", "general_sale_items", "general_sale_returns",
-]
+DATA_TABLES_FOR_STORE = STORE_BACKUP_TABLES  # 매장이 소유한 데이터 테이블 전체 (백업 범위와 동일)
 
 
 @app.delete("/api/admin/stores/{store_id}")

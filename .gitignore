@@ -3,6 +3,10 @@
 backups/
 chat_uploads/
 
+# 구글드라이브 백업 연동용 서비스 계정 키(비밀키) - 절대 올리면 안 됨
+gdrive-service-account*.json
+*-service-account.json
+
 # Python
 __pycache__/
 *.pyc
