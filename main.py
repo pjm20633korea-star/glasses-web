@@ -394,6 +394,10 @@ class GroupRenameIn(BaseModel):
     name: str
 
 
+class ChatMessageIn(BaseModel):
+    content: str
+
+
 @app.post("/api/login")
 def login(body: LoginIn, request: Request):
     with get_db() as conn:
@@ -1495,6 +1499,51 @@ def unpaid_status(store: dict = Depends(get_current_store)):
             ORDER BY total_unpaid DESC
         """, group_ids).fetchall()
         return [dict(r) for r in rows]
+
+
+# ---------- 그룹 채팅 API ----------
+# 같은 그룹(store_groups)에 속한 매장끼리만 서로 보이는 메시지. group_id로만 격리하며
+# (다른 테이블처럼 store_id 자체로 격리하지 않음) 그룹 내 모든 매장이 같은 대화를 공유함
+
+@app.post("/api/chat/messages")
+def send_chat_message(body: ChatMessageIn, store: dict = Depends(get_current_store)):
+    content = body.content.strip()
+    if not content:
+        raise HTTPException(status_code=400, detail="메시지 내용을 입력해 주세요")
+    if len(content) > 2000:
+        raise HTTPException(status_code=400, detail="메시지가 너무 깁니다 (최대 2000자)")
+    with get_db() as conn:
+        cur = conn.execute(
+            "INSERT INTO group_messages (group_id, store_id, content) VALUES (?, ?, ?)",
+            (store["group_id"], store["id"], content),
+        )
+        conn.commit()
+        row = conn.execute("SELECT * FROM group_messages WHERE id = ?", (cur.lastrowid,)).fetchone()
+        return {**dict(row), "store_name": store["name"]}
+
+
+@app.get("/api/chat/messages")
+def list_chat_messages(after_id: int = 0, limit: int = 100, store: dict = Depends(get_current_store)):
+    """after_id가 0이면 최신 메시지 limit개를 시간순으로, after_id가 있으면(폴링) 그 이후 새 메시지만 돌려줌"""
+    limit = min(max(limit, 1), 300)
+    with get_db() as conn:
+        if after_id:
+            rows = conn.execute(
+                """SELECT m.*, s.name AS store_name FROM group_messages m
+                   JOIN stores s ON s.id = m.store_id
+                   WHERE m.group_id = ? AND m.id > ?
+                   ORDER BY m.id ASC LIMIT ?""",
+                (store["group_id"], after_id, limit),
+            ).fetchall()
+            return [dict(r) for r in rows]
+        rows = conn.execute(
+            """SELECT m.*, s.name AS store_name FROM group_messages m
+               JOIN stores s ON s.id = m.store_id
+               WHERE m.group_id = ?
+               ORDER BY m.id DESC LIMIT ?""",
+            (store["group_id"], limit),
+        ).fetchall()
+        return [dict(r) for r in reversed(rows)]
 
 
 # ---------- 프론트엔드 서빙 ----------

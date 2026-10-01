@@ -274,6 +274,19 @@ def init_db():
     )
     """)
 
+    # ---- 그룹 채팅: 같은 그룹(store_groups)에 속한 매장끼리만 서로 보이는 메시지 ----
+    cur.execute("""
+    CREATE TABLE IF NOT EXISTS group_messages (
+        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        group_id INTEGER NOT NULL,
+        store_id INTEGER NOT NULL,
+        content TEXT NOT NULL,
+        created_at TEXT DEFAULT (datetime('now', 'localtime')),
+        FOREIGN KEY (group_id) REFERENCES store_groups (id),
+        FOREIGN KEY (store_id) REFERENCES stores (id)
+    )
+    """)
+
     # ---- 매장 격리: 데이터가 저장되는 9개 테이블 전부에 직접 store_id를 둠
     # (부모 테이블을 거치지 않고 바로 필터링할 수 있어야 JOIN 누락으로 다른 매장 데이터가
     #  새어나가는 사고를 막을 수 있음 - 자식 테이블에도 예외 없이 전부 추가)
