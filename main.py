@@ -6,12 +6,13 @@
 import json
 import os
 import time
+import uuid
 from datetime import date, datetime
 from pathlib import Path
 from typing import List, Optional
 
 import bcrypt
-from fastapi import Depends, FastAPI, HTTPException, Request
+from fastapi import Depends, FastAPI, File, Form, HTTPException, Request, UploadFile
 from fastapi.responses import FileResponse
 from pydantic import BaseModel
 from starlette.middleware.sessions import SessionMiddleware
@@ -289,6 +290,25 @@ def _in_placeholders(ids: List[int]) -> str:
 # optical.db 파일 하나를 그대로 복사하면 마침 쓰기 작업 중일 때 깨질 수 있으므로,
 # SQLite가 공식으로 제공하는 VACUUM INTO로 항상 손상 없는 완전한 스냅샷을 떠서 backups 폴더에 저장함
 BACKUP_DIR = Path("backups")
+
+# ---------- 채팅 사진/파일 첨부 ----------
+CHAT_UPLOAD_DIR = Path("chat_uploads")
+CHAT_UPLOAD_MAX_SIZE = 10 * 1024 * 1024  # 10MB
+# content-type을 신뢰하되 저장 파일명 확장자는 서버가 직접 정함(업로드된 파일명을 그대로 쓰지 않음)
+CHAT_UPLOAD_ALLOWED_TYPES = {
+    "image/jpeg": ".jpg",
+    "image/png": ".png",
+    "image/gif": ".gif",
+    "image/webp": ".webp",
+    "application/pdf": ".pdf",
+    "application/msword": ".doc",
+    "application/vnd.openxmlformats-officedocument.wordprocessingml.document": ".docx",
+    "application/vnd.ms-excel": ".xls",
+    "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet": ".xlsx",
+    "text/plain": ".txt",
+    "application/zip": ".zip",
+    "application/x-zip-compressed": ".zip",
+}
 
 
 def _do_backup(prefix: str) -> tuple[str, int]:
@@ -1745,6 +1765,69 @@ def send_room_message(room_id: int, body: ChatMessageIn, store: dict = Depends(g
         conn.commit()
         row = conn.execute("SELECT * FROM chat_messages WHERE id=?", (latest_id,)).fetchone()
         return {**dict(row), "store_name": store["name"]}
+
+
+@app.post("/api/chat/rooms/{room_id}/upload")
+async def upload_chat_attachment(
+    room_id: int, file: UploadFile = File(...), caption: str = Form(""),
+    store: dict = Depends(get_current_store),
+):
+    with get_db() as conn:
+        m = _get_joined_membership_or_403(conn, room_id, store["id"])
+
+    content_type = (file.content_type or "").split(";")[0].strip().lower()
+    ext = CHAT_UPLOAD_ALLOWED_TYPES.get(content_type)
+    if not ext:
+        raise HTTPException(
+            status_code=400,
+            detail="지원하지 않는 파일 형식입니다 (이미지, PDF, 워드/엑셀, 텍스트, zip만 가능)",
+        )
+
+    data = await file.read()
+    if not data:
+        raise HTTPException(status_code=400, detail="빈 파일은 보낼 수 없습니다")
+    if len(data) > CHAT_UPLOAD_MAX_SIZE:
+        raise HTTPException(status_code=400, detail="파일이 너무 큽니다 (최대 10MB)")
+
+    CHAT_UPLOAD_DIR.mkdir(exist_ok=True)
+    stored_name = f"{uuid.uuid4().hex}{ext}"
+    (CHAT_UPLOAD_DIR / stored_name).write_bytes(data)
+
+    original_name = (file.filename or "file").strip()[:255]
+    caption_text = caption.strip()[:2000]
+
+    with get_db() as conn:
+        cur = conn.execute(
+            """INSERT INTO chat_messages
+               (room_id, store_id, content, attachment_stored_name, attachment_original_name,
+                attachment_mime, attachment_size)
+               VALUES (?, ?, ?, ?, ?, ?, ?)""",
+            (room_id, store["id"], caption_text, stored_name, original_name, content_type, len(data)),
+        )
+        latest_id = cur.lastrowid
+        conn.execute("UPDATE chat_room_members SET last_read_message_id=? WHERE id=?", (latest_id, m["id"]))
+        conn.commit()
+        row = conn.execute("SELECT * FROM chat_messages WHERE id=?", (latest_id,)).fetchone()
+        return {**dict(row), "store_name": store["name"]}
+
+
+@app.get("/api/chat/attachments/{message_id}")
+def get_chat_attachment(message_id: int, store: dict = Depends(get_current_store)):
+    with get_db() as conn:
+        msg = conn.execute("SELECT * FROM chat_messages WHERE id = ?", (message_id,)).fetchone()
+        if not msg or not msg["attachment_stored_name"]:
+            raise HTTPException(status_code=404, detail="파일을 찾을 수 없습니다")
+        # 그 방에 참여 중인 매장만 열람 가능 (방 격리와 동일한 기준)
+        _get_joined_membership_or_403(conn, msg["room_id"], store["id"])
+
+    file_path = CHAT_UPLOAD_DIR / msg["attachment_stored_name"]
+    if not file_path.exists():
+        raise HTTPException(status_code=404, detail="파일을 찾을 수 없습니다")
+    return FileResponse(
+        file_path,
+        media_type=msg["attachment_mime"] or "application/octet-stream",
+        filename=msg["attachment_original_name"] or "file",
+    )
 
 
 # ---------- 프론트엔드 서빙 ----------

@@ -1,6 +1,7 @@
 # 실제 고객 데이터가 담긴 DB/백업 파일은 절대 git에 올리지 않음
 *.db
 backups/
+chat_uploads/
 
 # Python
 __pycache__/

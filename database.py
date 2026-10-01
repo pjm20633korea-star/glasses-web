@@ -316,6 +316,11 @@ def init_db():
         FOREIGN KEY (store_id) REFERENCES stores (id)
     )
     """)
+    # 채팅 사진/파일 첨부 - 실제 파일은 디스크(chat_uploads/)에 저장하고 여기엔 메타데이터만 둠
+    _migrate_add_column(cur, "chat_messages", "attachment_stored_name", "TEXT")
+    _migrate_add_column(cur, "chat_messages", "attachment_original_name", "TEXT")
+    _migrate_add_column(cur, "chat_messages", "attachment_mime", "TEXT")
+    _migrate_add_column(cur, "chat_messages", "attachment_size", "INTEGER")
 
     # ---- 매장 격리: 데이터가 저장되는 9개 테이블 전부에 직접 store_id를 둠
     # (부모 테이블을 거치지 않고 바로 필터링할 수 있어야 JOIN 누락으로 다른 매장 데이터가

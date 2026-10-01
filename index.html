@@ -194,6 +194,15 @@
   .chat-invite-card { border: 1px solid #f0c9cd; background: #fff5f6; border-radius: 6px; padding: 8px 10px; margin-bottom: 8px; }
   .chat-store-pick-row { display: flex; align-items: center; gap: 6px; padding: 4px 2px; font-size: 12px; }
   .chat-store-pick-row input { width: auto; margin: 0; }
+  .chat-attach-img { max-width: 220px; max-height: 220px; border-radius: 8px; display: block; margin-bottom: 4px; cursor: pointer; }
+  .chat-attach-file {
+    display: flex; align-items: center; gap: 6px; background: #fff; border: 1px solid #dde1e8;
+    border-radius: 8px; padding: 6px 10px; font-size: 11px; color: #2b3a55; text-decoration: none;
+    margin-bottom: 4px; max-width: 220px;
+  }
+  .chat-bubble-row.mine .chat-attach-file { background: #eef2fa; }
+  .chat-attach-name { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; flex: 1; }
+  .chat-attach-size { color: #99a; flex-shrink: 0; font-size: 9px; }
 </style>
 </head>
 <body>
@@ -698,7 +707,11 @@
       </div>
       <div id="chatRoomMembersBar" style="padding:6px 14px; font-size:10px; color:#667; border-bottom:1px solid #eee;"></div>
       <div id="chatMessages" style="flex:1; overflow-y:auto; padding:12px 14px; background:#f2f4f7; display:flex; flex-direction:column; gap:8px;"></div>
+      <div id="chatUploadStatus" style="display:none; padding:4px 14px; font-size:10px; color:#888; background:#fff;">파일 전송 중...</div>
       <div style="display:flex; gap:8px; padding:10px 14px; border-top:1px solid #dde1e8; background:#fff;">
+        <button class="btn-secondary" style="flex-shrink:0;" onclick="triggerChatFileSelect()" title="사진/파일 보내기">📎</button>
+        <input type="file" id="chatFileInput" style="display:none"
+               accept="image/*,.pdf,.doc,.docx,.xls,.xlsx,.txt,.zip" onchange="onChatFileSelected(event)">
         <textarea id="chatInput" rows="1" placeholder="메시지를 입력하세요 (Enter: 전송, Shift+Enter: 줄바꿈)"
                   style="flex:1; resize:none;" onkeydown="handleChatInputKeydown(event)"></textarea>
         <button class="btn-primary" onclick="sendChatMessage()">전송</button>
@@ -1586,19 +1599,44 @@ function renderChatMessages(messages, append) {
     const row = document.createElement("div");
     row.className = "chat-bubble-row " + (mine ? "mine" : "theirs");
     const time = (m.created_at || "").slice(5, 16).replace("T", " "); // MM-DD HH:MM
+    const attachHtml = m.attachment_stored_name ? renderChatAttachment(m) : "";
+    const textHtml = m.content ? `<div class="chat-bubble">${escapeHtml(m.content)}</div>` : "";
     row.innerHTML = `
       ${mine ? "" : `<div class="chat-sender">${escapeHtml(m.store_name || "")}</div>`}
-      <div class="chat-bubble">${escapeHtml(m.content)}</div>
+      ${attachHtml}
+      ${textHtml}
       <div class="chat-time">${time}</div>`;
     box.appendChild(row);
     chatLastId = Math.max(chatLastId, m.id);
     // append===true는 폴링으로 새로 온 메시지라는 뜻(초기 로드는 append===false) - 상대가 보낸 것만 알림
     if (append && !mine) {
       const roomTitle = document.getElementById("chatRoomTitle").textContent || m.store_name;
-      showChatNotification(`💬 ${roomTitle}`, `${m.store_name}: ${m.content}`);
+      const preview = m.attachment_stored_name ? `[파일] ${m.attachment_original_name || ""}` : m.content;
+      showChatNotification(`💬 ${roomTitle}`, `${m.store_name}: ${preview}`);
     }
   });
   if (!append || wasAtBottom) box.scrollTop = box.scrollHeight;
+}
+
+function formatFileSize(bytes) {
+  bytes = bytes || 0;
+  if (bytes < 1024) return bytes + " B";
+  if (bytes < 1024 * 1024) return (bytes / 1024).toFixed(1) + " KB";
+  return (bytes / 1024 / 1024).toFixed(1) + " MB";
+}
+
+function renderChatAttachment(m) {
+  const url = `/api/chat/attachments/${m.id}`;
+  if ((m.attachment_mime || "").startsWith("image/")) {
+    return `<a href="${url}" target="_blank" rel="noopener">
+      <img src="${url}" class="chat-attach-img" alt="${escapeHtml(m.attachment_original_name || "")}">
+    </a>`;
+  }
+  return `
+    <a href="${url}" target="_blank" rel="noopener" class="chat-attach-file">
+      📎 <span class="chat-attach-name">${escapeHtml(m.attachment_original_name || "파일")}</span>
+      <span class="chat-attach-size">${formatFileSize(m.attachment_size)}</span>
+    </a>`;
 }
 
 async function loadChatMessages(reset) {
@@ -1637,6 +1675,44 @@ function handleChatInputKeydown(event) {
     event.preventDefault();
     sendChatMessage();
   }
+}
+
+/* ---- 사진/파일 첨부 ---- */
+const CHAT_UPLOAD_MAX_SIZE = 10 * 1024 * 1024; // 서버 쪽 제한(10MB)과 맞춤 - 큰 파일은 보내기 전에 미리 걸러줌
+
+function triggerChatFileSelect() {
+  if (!currentRoomId) return;
+  document.getElementById("chatFileInput").click();
+}
+
+async function onChatFileSelected(event) {
+  const file = event.target.files[0];
+  event.target.value = ""; // 같은 파일을 다시 선택해도 change 이벤트가 또 일어나도록 초기화
+  if (!file || !currentRoomId) return;
+  if (file.size > CHAT_UPLOAD_MAX_SIZE) {
+    alert("파일이 너무 큽니다 (최대 10MB).");
+    return;
+  }
+
+  const captionInput = document.getElementById("chatInput");
+  const caption = captionInput.value.trim();
+  const formData = new FormData();
+  formData.append("file", file);
+  formData.append("caption", caption);
+
+  const statusEl = document.getElementById("chatUploadStatus");
+  statusEl.style.display = "";
+  const res = await fetch(`/api/chat/rooms/${currentRoomId}/upload`, { method: "POST", body: formData });
+  statusEl.style.display = "none";
+
+  if (!res.ok) {
+    let detail = "";
+    try { detail = (await res.json()).detail || ""; } catch (e) { /* 무시 */ }
+    alert("파일 전송 중 오류가 발생했습니다." + (detail ? "\n\n" + detail : ""));
+    return;
+  }
+  captionInput.value = "";
+  loadChatMessages(false);
 }
 
 /* ---- 기존 방에 매장 추가 초대 ---- */
