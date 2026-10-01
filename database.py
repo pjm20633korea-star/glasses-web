@@ -274,15 +274,45 @@ def init_db():
     )
     """)
 
-    # ---- 그룹 채팅: 같은 그룹(store_groups)에 속한 매장끼리만 서로 보이는 메시지 ----
+    # ---- 매장 채팅: 같은 그룹(store_groups) 안에서 매장이 원하는 상대(들)만 골라 만드는 채팅방 ----
+    # 1번 매장이 2번 매장에게만 요청할 수도 있고, 여러 매장을 한 방에 초대할 수도 있음.
+    # 초대받은 매장은 수락(joined)하기 전까지는 대화 내용을 볼 수 없음(invited 상태)
     cur.execute("""
-    CREATE TABLE IF NOT EXISTS group_messages (
+    CREATE TABLE IF NOT EXISTS chat_rooms (
         id INTEGER PRIMARY KEY AUTOINCREMENT,
         group_id INTEGER NOT NULL,
+        name TEXT,
+        created_by INTEGER NOT NULL,
+        created_at TEXT DEFAULT (datetime('now', 'localtime')),
+        FOREIGN KEY (group_id) REFERENCES store_groups (id),
+        FOREIGN KEY (created_by) REFERENCES stores (id)
+    )
+    """)
+
+    cur.execute("""
+    CREATE TABLE IF NOT EXISTS chat_room_members (
+        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        room_id INTEGER NOT NULL,
+        store_id INTEGER NOT NULL,
+        status TEXT NOT NULL DEFAULT 'invited',
+        invited_by INTEGER,
+        last_read_message_id INTEGER DEFAULT 0,
+        created_at TEXT DEFAULT (datetime('now', 'localtime')),
+        joined_at TEXT,
+        FOREIGN KEY (room_id) REFERENCES chat_rooms (id),
+        FOREIGN KEY (store_id) REFERENCES stores (id),
+        UNIQUE (room_id, store_id)
+    )
+    """)
+
+    cur.execute("""
+    CREATE TABLE IF NOT EXISTS chat_messages (
+        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        room_id INTEGER NOT NULL,
         store_id INTEGER NOT NULL,
         content TEXT NOT NULL,
         created_at TEXT DEFAULT (datetime('now', 'localtime')),
-        FOREIGN KEY (group_id) REFERENCES store_groups (id),
+        FOREIGN KEY (room_id) REFERENCES chat_rooms (id),
         FOREIGN KEY (store_id) REFERENCES stores (id)
     )
     """)

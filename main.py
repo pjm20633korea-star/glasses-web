@@ -1501,49 +1501,250 @@ def unpaid_status(store: dict = Depends(get_current_store)):
         return [dict(r) for r in rows]
 
 
-# ---------- 그룹 채팅 API ----------
-# 같은 그룹(store_groups)에 속한 매장끼리만 서로 보이는 메시지. group_id로만 격리하며
-# (다른 테이블처럼 store_id 자체로 격리하지 않음) 그룹 내 모든 매장이 같은 대화를 공유함
+# ---------- 매장 채팅 API ----------
+# 같은 그룹 안에서 매장이 원하는 상대(들)만 골라 채팅방을 만듦.
+# 1번 매장이 2번 매장 한 곳에만 요청할 수도 있고, 여러 매장을 한 방에 초대할 수도 있음.
+# 초대받은 매장은 수락(joined)하기 전까지는 그 방의 대화를 읽거나 쓸 수 없음(invited 상태로만 존재)
 
-@app.post("/api/chat/messages")
-def send_chat_message(body: ChatMessageIn, store: dict = Depends(get_current_store)):
+def _get_room_or_404(conn, room_id: int):
+    room = conn.execute("SELECT * FROM chat_rooms WHERE id = ?", (room_id,)).fetchone()
+    if not room:
+        raise HTTPException(status_code=404, detail="채팅방을 찾을 수 없습니다")
+    return room
+
+
+def _get_joined_membership_or_403(conn, room_id: int, store_id: int):
+    m = conn.execute(
+        "SELECT * FROM chat_room_members WHERE room_id = ? AND store_id = ? AND status = 'joined'",
+        (room_id, store_id),
+    ).fetchone()
+    if not m:
+        raise HTTPException(status_code=403, detail="참여 중인 채팅방이 아닙니다")
+    return m
+
+
+def _room_display_name(conn, room, my_store_id: int) -> str:
+    if room["name"]:
+        return room["name"]
+    others = conn.execute(
+        """SELECT s.name FROM chat_room_members crm JOIN stores s ON s.id = crm.store_id
+           WHERE crm.room_id = ? AND crm.store_id != ?""",
+        (room["id"], my_store_id),
+    ).fetchall()
+    names = [r["name"] for r in others]
+    return ", ".join(names) if names else "(나만 있는 채팅방)"
+
+
+class ChatRoomCreateIn(BaseModel):
+    name: Optional[str] = None
+    store_ids: List[int]
+
+
+class ChatRoomInviteIn(BaseModel):
+    store_ids: List[int]
+
+
+@app.get("/api/chat/group-stores")
+def list_chat_group_stores(store: dict = Depends(get_current_store)):
+    """채팅방을 만들거나 초대할 때 고를 수 있는, 같은 그룹의 다른 매장 목록"""
+    with get_db() as conn:
+        rows = conn.execute(
+            "SELECT id, name FROM stores WHERE group_id = ? AND id != ? ORDER BY name",
+            (store["group_id"], store["id"]),
+        ).fetchall()
+        return [dict(r) for r in rows]
+
+
+@app.post("/api/chat/rooms")
+def create_chat_room(body: ChatRoomCreateIn, store: dict = Depends(get_current_store)):
+    if not body.store_ids:
+        raise HTTPException(status_code=400, detail="초대할 매장을 한 곳 이상 선택해 주세요")
+    with get_db() as conn:
+        ph = _in_placeholders(body.store_ids)
+        valid_ids = {
+            r["id"] for r in conn.execute(
+                f"SELECT id FROM stores WHERE group_id = ? AND id IN ({ph})",
+                (store["group_id"], *body.store_ids),
+            ).fetchall()
+        }
+        invite_ids = [sid for sid in dict.fromkeys(body.store_ids) if sid in valid_ids and sid != store["id"]]
+        if not invite_ids:
+            raise HTTPException(status_code=400, detail="초대할 수 있는 같은 그룹 매장이 없습니다")
+
+        cur = conn.execute(
+            "INSERT INTO chat_rooms (group_id, name, created_by) VALUES (?, ?, ?)",
+            (store["group_id"], (body.name or "").strip() or None, store["id"]),
+        )
+        room_id = cur.lastrowid
+        conn.execute(
+            """INSERT INTO chat_room_members (room_id, store_id, status, invited_by, joined_at)
+               VALUES (?, ?, 'joined', ?, datetime('now','localtime'))""",
+            (room_id, store["id"], store["id"]),
+        )
+        for sid in invite_ids:
+            conn.execute(
+                "INSERT INTO chat_room_members (room_id, store_id, status, invited_by) VALUES (?, ?, 'invited', ?)",
+                (room_id, sid, store["id"]),
+            )
+        conn.commit()
+        return {"id": room_id}
+
+
+@app.get("/api/chat/rooms")
+def list_chat_rooms(store: dict = Depends(get_current_store)):
+    """내가 참여 중이거나(joined) 초대받은(invited) 채팅방 목록 + 마지막 메시지/안읽은 개수"""
+    with get_db() as conn:
+        my_memberships = conn.execute(
+            "SELECT * FROM chat_room_members WHERE store_id = ? AND status IN ('joined','invited')",
+            (store["id"],),
+        ).fetchall()
+
+        result = []
+        for m in my_memberships:
+            room = conn.execute("SELECT * FROM chat_rooms WHERE id = ?", (m["room_id"],)).fetchone()
+            if not room:
+                continue
+            members = conn.execute(
+                """SELECT crm.store_id, crm.status, s.name AS store_name
+                   FROM chat_room_members crm JOIN stores s ON s.id = crm.store_id
+                   WHERE crm.room_id = ?""",
+                (room["id"],),
+            ).fetchall()
+            last_msg = conn.execute(
+                "SELECT content, created_at, store_id FROM chat_messages WHERE room_id = ? ORDER BY id DESC LIMIT 1",
+                (room["id"],),
+            ).fetchone()
+            unread = 0
+            if m["status"] == "joined":
+                unread = conn.execute(
+                    "SELECT COUNT(*) FROM chat_messages WHERE room_id = ? AND id > ?",
+                    (room["id"], m["last_read_message_id"] or 0),
+                ).fetchone()[0]
+            result.append({
+                "id": room["id"],
+                "name": _room_display_name(conn, room, store["id"]),
+                "my_status": m["status"],
+                "created_by": room["created_by"],
+                "members": [dict(mm) for mm in members],
+                "last_message": dict(last_msg) if last_msg else None,
+                "last_activity": (last_msg["created_at"] if last_msg else room["created_at"]),
+                "unread_count": unread,
+            })
+        result.sort(key=lambda r: r["last_activity"] or "", reverse=True)
+        return result
+
+
+@app.post("/api/chat/rooms/{room_id}/accept")
+def accept_chat_room(room_id: int, store: dict = Depends(get_current_store)):
+    with get_db() as conn:
+        m = conn.execute(
+            "SELECT * FROM chat_room_members WHERE room_id = ? AND store_id = ?", (room_id, store["id"]),
+        ).fetchone()
+        if not m:
+            raise HTTPException(status_code=404, detail="채팅 요청을 찾을 수 없습니다")
+        conn.execute(
+            "UPDATE chat_room_members SET status='joined', joined_at=datetime('now','localtime') WHERE id=?",
+            (m["id"],),
+        )
+        conn.commit()
+        return {"ok": True}
+
+
+@app.post("/api/chat/rooms/{room_id}/decline")
+def decline_chat_room(room_id: int, store: dict = Depends(get_current_store)):
+    with get_db() as conn:
+        m = conn.execute(
+            "SELECT * FROM chat_room_members WHERE room_id = ? AND store_id = ?", (room_id, store["id"]),
+        ).fetchone()
+        if not m:
+            raise HTTPException(status_code=404, detail="채팅 요청을 찾을 수 없습니다")
+        conn.execute("UPDATE chat_room_members SET status='declined' WHERE id=?", (m["id"],))
+        conn.commit()
+        return {"ok": True}
+
+
+@app.post("/api/chat/rooms/{room_id}/invite")
+def invite_to_chat_room(room_id: int, body: ChatRoomInviteIn, store: dict = Depends(get_current_store)):
+    if not body.store_ids:
+        raise HTTPException(status_code=400, detail="초대할 매장을 한 곳 이상 선택해 주세요")
+    with get_db() as conn:
+        room = _get_room_or_404(conn, room_id)
+        _get_joined_membership_or_403(conn, room_id, store["id"])
+
+        ph = _in_placeholders(body.store_ids)
+        valid_ids = {
+            r["id"] for r in conn.execute(
+                f"SELECT id FROM stores WHERE group_id = ? AND id IN ({ph})",
+                (room["group_id"], *body.store_ids),
+            ).fetchall()
+        }
+        existing_ids = {
+            r["store_id"] for r in
+            conn.execute("SELECT store_id FROM chat_room_members WHERE room_id=?", (room_id,)).fetchall()
+        }
+
+        added = []
+        for sid in dict.fromkeys(body.store_ids):
+            if sid in valid_ids and sid not in existing_ids:
+                conn.execute(
+                    "INSERT INTO chat_room_members (room_id, store_id, status, invited_by) VALUES (?, ?, 'invited', ?)",
+                    (room_id, sid, store["id"]),
+                )
+                added.append(sid)
+        conn.commit()
+        return {"added": added}
+
+
+@app.get("/api/chat/rooms/{room_id}/messages")
+def list_room_messages(room_id: int, after_id: int = 0, limit: int = 150, store: dict = Depends(get_current_store)):
+    """after_id가 0이면 최신 메시지 limit개를 시간순으로, after_id가 있으면(폴링) 그 이후 새 메시지만 돌려줌.
+    (참여 중인 방에서만 조회 가능, 조회하는 즉시 그 지점까지 읽음 처리됨)"""
+    limit = min(max(limit, 1), 300)
+    with get_db() as conn:
+        m = _get_joined_membership_or_403(conn, room_id, store["id"])
+
+        if after_id:
+            rows = conn.execute(
+                """SELECT cm.*, s.name AS store_name FROM chat_messages cm JOIN stores s ON s.id = cm.store_id
+                   WHERE cm.room_id = ? AND cm.id > ? ORDER BY cm.id ASC LIMIT ?""",
+                (room_id, after_id, limit),
+            ).fetchall()
+            messages = [dict(r) for r in rows]
+        else:
+            rows = conn.execute(
+                """SELECT cm.*, s.name AS store_name FROM chat_messages cm JOIN stores s ON s.id = cm.store_id
+                   WHERE cm.room_id = ? ORDER BY cm.id DESC LIMIT ?""",
+                (room_id, limit),
+            ).fetchall()
+            messages = [dict(r) for r in reversed(rows)]
+
+        latest_id = conn.execute(
+            "SELECT MAX(id) FROM chat_messages WHERE room_id = ?", (room_id,)
+        ).fetchone()[0] or 0
+        if latest_id > (m["last_read_message_id"] or 0):
+            conn.execute("UPDATE chat_room_members SET last_read_message_id=? WHERE id=?", (latest_id, m["id"]))
+            conn.commit()
+        return messages
+
+
+@app.post("/api/chat/rooms/{room_id}/messages")
+def send_room_message(room_id: int, body: ChatMessageIn, store: dict = Depends(get_current_store)):
     content = body.content.strip()
     if not content:
         raise HTTPException(status_code=400, detail="메시지 내용을 입력해 주세요")
     if len(content) > 2000:
         raise HTTPException(status_code=400, detail="메시지가 너무 깁니다 (최대 2000자)")
     with get_db() as conn:
+        m = _get_joined_membership_or_403(conn, room_id, store["id"])
         cur = conn.execute(
-            "INSERT INTO group_messages (group_id, store_id, content) VALUES (?, ?, ?)",
-            (store["group_id"], store["id"], content),
+            "INSERT INTO chat_messages (room_id, store_id, content) VALUES (?, ?, ?)",
+            (room_id, store["id"], content),
         )
+        latest_id = cur.lastrowid
+        conn.execute("UPDATE chat_room_members SET last_read_message_id=? WHERE id=?", (latest_id, m["id"]))
         conn.commit()
-        row = conn.execute("SELECT * FROM group_messages WHERE id = ?", (cur.lastrowid,)).fetchone()
+        row = conn.execute("SELECT * FROM chat_messages WHERE id=?", (latest_id,)).fetchone()
         return {**dict(row), "store_name": store["name"]}
-
-
-@app.get("/api/chat/messages")
-def list_chat_messages(after_id: int = 0, limit: int = 100, store: dict = Depends(get_current_store)):
-    """after_id가 0이면 최신 메시지 limit개를 시간순으로, after_id가 있으면(폴링) 그 이후 새 메시지만 돌려줌"""
-    limit = min(max(limit, 1), 300)
-    with get_db() as conn:
-        if after_id:
-            rows = conn.execute(
-                """SELECT m.*, s.name AS store_name FROM group_messages m
-                   JOIN stores s ON s.id = m.store_id
-                   WHERE m.group_id = ? AND m.id > ?
-                   ORDER BY m.id ASC LIMIT ?""",
-                (store["group_id"], after_id, limit),
-            ).fetchall()
-            return [dict(r) for r in rows]
-        rows = conn.execute(
-            """SELECT m.*, s.name AS store_name FROM group_messages m
-               JOIN stores s ON s.id = m.store_id
-               WHERE m.group_id = ?
-               ORDER BY m.id DESC LIMIT ?""",
-            (store["group_id"], limit),
-        ).fetchall()
-        return [dict(r) for r in reversed(rows)]
 
 
 # ---------- 프론트엔드 서빙 ----------
