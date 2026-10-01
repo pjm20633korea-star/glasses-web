@@ -238,8 +238,7 @@
       <span id="chatUnreadBadge" style="display:none; position:absolute; top:-6px; right:-6px; background:#b23a48; color:white; border-radius:9px; font-size:9px; padding:1px 5px; font-weight:bold;"></span>
     </button>
     <button class="topbtn" id="notifyToggleBtn" style="align-self:center;" onclick="toggleDesktopNotify()" title="새 채팅 메시지가 오면 소리/데스크탑 알림으로 알려줍니다">🔕 알림 꺼짐</button>
-    <button class="topbtn" id="backupTopBtn" style="align-self:center; display:none;" onclick="createBackup(this)" title="고객정보를 포함한 전체 데이터를 지금 바로 백업합니다">💾 백업</button>
-    <button class="topbtn" style="align-self:center;" onclick="openAccountModal()">⚙️ 계정 설정</button>
+    <button class="topbtn" style="align-self:center;" onclick="openSettingsModal()">⚙️ 설정</button>
     <button class="topbtn" style="margin-right:10px; align-self:center;" onclick="doLogout()">로그아웃</button>
   </div>
   <div class="mega-icons">
@@ -639,30 +638,47 @@
   </div>
 </div>
 
-<!-- ================= 계정 설정 모달 ================= -->
-<div id="accountModal" class="modal-overlay" style="display:none;">
-  <div class="modal-box" style="width:360px;">
-    <h3>계정 설정</h3>
-    <p style="font-size:11px; color:#888; margin:4px 0 14px;">
-      매장: <b id="acctStoreName"></b> (현재 로그인 ID: <b id="acctLoginId"></b>)
-    </p>
+<!-- ================= 설정 모달 =================
+     탭 하나당 설정 묶음 하나(계정/백업 ...). 앞으로 설정 항목이 늘어나면 탭만 추가하면 됨 -->
+<div id="settingsModal" class="modal-overlay" style="display:none;">
+  <div class="modal-box as-modal-box" style="width:480px; padding:0;">
+    <div class="as-titlebar">
+      <span>⚙️ 설정</span>
+      <span class="as-close" onclick="closeSettingsModal()">✕</span>
+    </div>
+    <div class="as-tabbar">
+      <div class="as-tab active" id="settingsTab_account" onclick="switchSettingsTab('account')">👤 계정</div>
+      <div class="as-tab" id="settingsTab_backup" onclick="switchSettingsTab('backup')">💾 백업</div>
+    </div>
 
-    <label>현재 비밀번호</label>
-    <input id="acct_current_password" type="password" style="width:100%; box-sizing:border-box;">
+    <div class="as-body" id="settingsView_account">
+      <p style="font-size:11px; color:#888; margin:0 0 14px;">
+        매장: <b id="acctStoreName"></b> (현재 로그인 ID: <b id="acctLoginId"></b>)
+      </p>
 
-    <hr style="margin:14px 0; border:none; border-top:1px solid #e5e5e5;">
+      <label>현재 비밀번호</label>
+      <input id="acct_current_password" type="password" style="width:100%; box-sizing:border-box;">
 
-    <label>새 비밀번호</label>
-    <input id="acct_new_password" type="password" style="width:100%; box-sizing:border-box; margin-bottom:8px;">
-    <label>새 비밀번호 확인</label>
-    <input id="acct_new_password2" type="password" style="width:100%; box-sizing:border-box; margin-bottom:8px;"
-           onkeydown="if(event.key==='Enter') changePasswordAction();">
-    <button class="btn-secondary" style="width:100%;" onclick="changePasswordAction()">비밀번호 변경</button>
+      <hr style="margin:14px 0; border:none; border-top:1px solid #e5e5e5;">
 
-    <div id="acctMsg" style="font-size:12px; margin-top:10px; display:none;"></div>
+      <label>새 비밀번호</label>
+      <input id="acct_new_password" type="password" style="width:100%; box-sizing:border-box; margin-bottom:8px;">
+      <label>새 비밀번호 확인</label>
+      <input id="acct_new_password2" type="password" style="width:100%; box-sizing:border-box; margin-bottom:8px;"
+             onkeydown="if(event.key==='Enter') changePasswordAction();">
+      <button class="btn-secondary" style="width:100%;" onclick="changePasswordAction()">비밀번호 변경</button>
 
-    <div class="btn-row" style="margin-top:14px;">
-      <button class="btn-danger" style="flex:1;" onclick="closeAccountModal()">닫기</button>
+      <div id="acctMsg" style="font-size:12px; margin-top:10px; display:none;"></div>
+    </div>
+
+    <div class="as-body" id="settingsView_backup" style="display:none;">
+      <p style="font-size:11px; color:#888; margin:0 0 10px;">
+        고객정보를 포함한 전체 데이터를 지금 바로 백업합니다. (매일 한 번 자동으로도 백업됩니다)
+      </p>
+      <button id="settingsBackupBtn" class="btn-secondary" style="width:100%;" onclick="createBackup(this)">💾 지금 백업하기</button>
+
+      <div style="font-size:11px; color:#555; font-weight:bold; margin:16px 0 4px;">최근 백업 목록</div>
+      <div id="backupListBox" style="max-height:220px; overflow-y:auto; border:1px solid #dde1e8; border-radius:4px;"></div>
     </div>
   </div>
 </div>
@@ -1267,7 +1283,6 @@ async function checkAuth() {
   document.getElementById("loginOverlay").style.display = "none";
   document.getElementById("storeIndicator").textContent =
     `${currentStoreInfo.name}${currentStoreInfo.group_name ? " · " + currentStoreInfo.group_name : ""}`;
-  document.getElementById("backupTopBtn").style.display = currentStoreInfo.is_admin ? "" : "none";
   loadChatNotifyPref();
   await initChatBaseline();
   return true;
@@ -1317,8 +1332,10 @@ async function doLogout() {
   location.reload();
 }
 
-/* ================= 계정 설정 (비밀번호 변경) ================= */
-function openAccountModal() {
+/* ================= 설정 (탭: 계정 / 백업 / 앞으로 추가될 것들) ================= */
+const SETTINGS_TABS = ["account", "backup"]; // 새 설정 탭을 추가할 땐 여기에 이름만 더하면 됨
+
+function openSettingsModal() {
   if (!currentStoreInfo) return;
   document.getElementById("acctStoreName").textContent = currentStoreInfo.name;
   document.getElementById("acctLoginId").textContent = currentStoreInfo.login_id;
@@ -1326,11 +1343,22 @@ function openAccountModal() {
   document.getElementById("acct_new_password").value = "";
   document.getElementById("acct_new_password2").value = "";
   document.getElementById("acctMsg").style.display = "none";
-  document.getElementById("accountModal").style.display = "flex";
+  // 백업은 모든 매장의 데이터가 한 파일에 담기므로 관리자만 볼 수 있게 탭 자체를 숨김
+  document.getElementById("settingsTab_backup").style.display = currentStoreInfo.is_admin ? "" : "none";
+  switchSettingsTab("account");
+  document.getElementById("settingsModal").style.display = "flex";
 }
 
-function closeAccountModal() {
-  document.getElementById("accountModal").style.display = "none";
+function closeSettingsModal() {
+  document.getElementById("settingsModal").style.display = "none";
+}
+
+function switchSettingsTab(tab) {
+  SETTINGS_TABS.forEach(t => {
+    document.getElementById(`settingsTab_${t}`).classList.toggle("active", t === tab);
+    document.getElementById(`settingsView_${t}`).style.display = t === tab ? "" : "none";
+  });
+  if (tab === "backup") loadBackupList();
 }
 
 /* ================= 채팅 알림 (소리 + 데스크탑 알림) =================
@@ -1831,9 +1859,36 @@ async function createBackup(btn) {
     const data = await res.json();
     const sizeKb = Math.round(data.size / 1024).toLocaleString();
     alert(`백업이 완료되었습니다!\n\n파일: backups\\${data.filename}\n크기: ${sizeKb} KB\n\n(optical_app 폴더 안의 backups 폴더에 저장됩니다. 더 안전하게 보관하려면 이 폴더를 USB나 다른 저장소에도 복사해 두세요.)`);
+    loadBackupList();
   } finally {
-    if (btn) { btn.disabled = false; btn.textContent = "💾 백업"; }
+    if (btn) { btn.disabled = false; btn.textContent = "💾 지금 백업하기"; }
   }
+}
+
+async function loadBackupList() {
+  const box = document.getElementById("backupListBox");
+  box.innerHTML = '<div style="padding:10px; font-size:11px; color:#99a;">불러오는 중...</div>';
+  const res = await fetch("/api/backups");
+  if (!res.ok) {
+    box.innerHTML = '<div style="padding:10px; font-size:11px; color:#99a;">목록을 불러올 수 없습니다.</div>';
+    return;
+  }
+  const backups = await res.json();
+  if (backups.length === 0) {
+    box.innerHTML = '<div style="padding:10px; font-size:11px; color:#99a;">아직 백업이 없습니다.</div>';
+    return;
+  }
+  box.innerHTML = backups.map(b => `
+    <div style="display:flex; justify-content:space-between; align-items:center; gap:8px; padding:6px 10px; border-bottom:1px solid #eee; font-size:11px;">
+      <div style="overflow:hidden; text-overflow:ellipsis; white-space:nowrap;">
+        <span style="display:inline-block; min-width:34px; padding:1px 5px; border-radius:3px; font-size:9px; font-weight:bold;
+                     background:${b.kind === "manual" ? "#dbe6ff" : "#eef1f6"}; color:${b.kind === "manual" ? "#2b3a55" : "#667"};">
+          ${b.kind === "manual" ? "수동" : "자동"}
+        </span>
+        <span style="margin-left:6px; color:#555;">${b.created_at}</span>
+      </div>
+      <div style="flex-shrink:0; color:#99a;">${formatFileSize(b.size)}</div>
+    </div>`).join("");
 }
 
 // 검안매출/매출현황/미수금현황을 브라우저 탭처럼 취급함: 한 번 열면 위쪽 탭줄에 탭이 생기고,
