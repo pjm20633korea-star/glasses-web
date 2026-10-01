@@ -228,6 +228,7 @@
       💬 매장 채팅
       <span id="chatUnreadBadge" style="display:none; position:absolute; top:-6px; right:-6px; background:#b23a48; color:white; border-radius:9px; font-size:9px; padding:1px 5px; font-weight:bold;"></span>
     </button>
+    <button class="topbtn" id="notifyToggleBtn" style="align-self:center;" onclick="toggleDesktopNotify()" title="새 채팅 메시지가 오면 소리/데스크탑 알림으로 알려줍니다">🔕 알림 꺼짐</button>
     <button class="topbtn" id="backupTopBtn" style="align-self:center; display:none;" onclick="createBackup(this)" title="고객정보를 포함한 전체 데이터를 지금 바로 백업합니다">💾 백업</button>
     <button class="topbtn" style="align-self:center;" onclick="openAccountModal()">⚙️ 계정 설정</button>
     <button class="topbtn" style="margin-right:10px; align-self:center;" onclick="doLogout()">로그아웃</button>
@@ -1225,6 +1226,7 @@ async function checkAuth() {
   document.getElementById("storeIndicator").textContent =
     `${currentStoreInfo.name}${currentStoreInfo.group_name ? " · " + currentStoreInfo.group_name : ""}`;
   document.getElementById("backupTopBtn").style.display = currentStoreInfo.is_admin ? "" : "none";
+  loadChatNotifyPref();
   await initChatBaseline();
   return true;
 }
@@ -1233,7 +1235,12 @@ async function checkAuth() {
 async function initChatBaseline() {
   try {
     const res = await fetch("/api/chat/rooms");
-    if (res.ok) { chatRooms = await res.json(); updateChatBadgeFromRooms(); }
+    if (res.ok) {
+      const rooms = await res.json();
+      detectAndNotifyRoomChanges(rooms); // 알림 없이 기준점만 잡아둠(chatSnapshotInitialized=false라 안 울림)
+      chatRooms = rooms;
+      updateChatBadgeFromRooms();
+    }
   } catch (e) { /* 무시 - 채팅 배지는 부가기능이라 실패해도 앱 사용에는 지장 없음 */ }
   startChatBadgeWatcher();
 }
@@ -1284,6 +1291,83 @@ function closeAccountModal() {
   document.getElementById("accountModal").style.display = "none";
 }
 
+/* ================= 채팅 알림 (소리 + 데스크탑 알림) =================
+   브라우저 Notification API + Web Audio API로 구현. 효과음은 외부 파일 없이 오실레이터로 직접 생성함.
+   기본은 꺼짐(opt-in) - 헤더의 🔔 버튼을 눌러야 켜지고, 그 선택은 이 브라우저에 localStorage로 기억됨.
+   데스크탑 알림 팝업은 브라우저 권한 허용 + HTTPS(또는 localhost)에서만 뜨고, 권한이 없거나 막혀있어도
+   효과음은 계속 울림 */
+let chatNotifyEnabled = false;
+let chatAudioCtx = null;
+
+function loadChatNotifyPref() {
+  chatNotifyEnabled = localStorage.getItem("chatNotifyEnabled") === "1";
+  if (chatNotifyEnabled) {
+    try { chatAudioCtx = new (window.AudioContext || window.webkitAudioContext)(); } catch (e) { /* 무시 */ }
+  }
+  updateNotifyBtnLabel();
+}
+
+function updateNotifyBtnLabel() {
+  const btn = document.getElementById("notifyToggleBtn");
+  if (!btn) return;
+  btn.textContent = chatNotifyEnabled ? "🔔 알림 켜짐" : "🔕 알림 꺼짐";
+}
+
+async function toggleDesktopNotify() {
+  if (!chatNotifyEnabled) {
+    chatNotifyEnabled = true;
+    if (!chatAudioCtx) {
+      try { chatAudioCtx = new (window.AudioContext || window.webkitAudioContext)(); } catch (e) { /* 무시 */ }
+    }
+    if ("Notification" in window && Notification.permission === "default") {
+      try { await Notification.requestPermission(); } catch (e) { /* 무시 */ }
+    }
+    if ("Notification" in window && Notification.permission === "denied") {
+      alert("브라우저 알림 권한이 차단되어 있어 데스크탑 알림은 뜨지 않습니다.\n(효과음은 계속 울립니다. 팝업도 받으려면 브라우저 설정에서 이 사이트의 알림을 허용해 주세요.)");
+    }
+    playChatBeep(); // 바로 한 번 울려서 소리가 켜졌는지 확인시켜줌
+  } else {
+    chatNotifyEnabled = false;
+  }
+  localStorage.setItem("chatNotifyEnabled", chatNotifyEnabled ? "1" : "0");
+  updateNotifyBtnLabel();
+}
+
+// 브라우저 자동재생 정책 때문에 사용자 제스처 없이 생성된 AudioContext는 suspended 상태로 시작할 수 있음 -
+// 페이지에서 어떤 클릭이든 한 번 일어나면(채팅 버튼이 아니어도) 깨워줌
+document.addEventListener("click", () => {
+  if (chatAudioCtx && chatAudioCtx.state === "suspended") chatAudioCtx.resume().catch(() => {});
+});
+
+function playChatBeep() {
+  if (!chatAudioCtx) return;
+  try {
+    if (chatAudioCtx.state === "suspended") chatAudioCtx.resume();
+    const osc = chatAudioCtx.createOscillator();
+    const gain = chatAudioCtx.createGain();
+    osc.type = "sine";
+    osc.frequency.value = 880;
+    gain.gain.setValueAtTime(0.0001, chatAudioCtx.currentTime);
+    gain.gain.exponentialRampToValueAtTime(0.25, chatAudioCtx.currentTime + 0.01);
+    gain.gain.exponentialRampToValueAtTime(0.0001, chatAudioCtx.currentTime + 0.35);
+    osc.connect(gain);
+    gain.connect(chatAudioCtx.destination);
+    osc.start();
+    osc.stop(chatAudioCtx.currentTime + 0.35);
+  } catch (e) { /* 무시 - 오디오가 막혀 있어도 앱 사용에는 지장 없음 */ }
+}
+
+function showChatNotification(title, body) {
+  if (!chatNotifyEnabled) return;
+  playChatBeep();
+  if ("Notification" in window && Notification.permission === "granted" && !document.hasFocus()) {
+    try {
+      const n = new Notification(title, { body: body || "" });
+      n.onclick = () => { window.focus(); n.close(); };
+    } catch (e) { /* 무시 */ }
+  }
+}
+
 /* ================= 매장 채팅 =================
    같은 그룹 안에서 매장이 원하는 상대(들)만 골라 만드는 채팅방.
    1번 매장이 2번 매장 한 곳에만 채팅을 요청할 수도 있고, 여러 매장을 한 방에 초대할 수도 있음.
@@ -1327,10 +1411,38 @@ function closeChatModal() {
 }
 
 /* ---- 채팅방 목록 ---- */
+// 직전 목록 스냅샷과 비교해 "새로 생긴" 채팅 요청/안읽은 메시지만 알림을 울림 (로그인 직후 기존 데이터까지
+// 전부 알리지 않도록 첫 호출은 알림 없이 기준점만 잡아둠)
+let chatRoomsSnapshotById = {};
+let chatSnapshotInitialized = false;
+
+function detectAndNotifyRoomChanges(newRooms) {
+  if (chatSnapshotInitialized) {
+    newRooms.forEach(r => {
+      const prev = chatRoomsSnapshotById[r.id];
+      if (r.my_status === "invited" && (!prev || prev.my_status !== "invited")) {
+        showChatNotification("📩 채팅 요청", `${r.name}에서 채팅을 요청했습니다.`);
+      }
+      // 지금 열어서 보고 있는 방은 renderChatMessages 쪽에서 이미 메시지 단위로 알림을 울리므로 여기서는 건너뜀
+      if (r.my_status === "joined" && r.id !== currentRoomId) {
+        const prevUnread = prev ? (prev.unread_count || 0) : 0;
+        if ((r.unread_count || 0) > prevUnread) {
+          showChatNotification(`💬 ${r.name}`, r.last_message ? r.last_message.content : "");
+        }
+      }
+    });
+  }
+  chatRoomsSnapshotById = {};
+  newRooms.forEach(r => { chatRoomsSnapshotById[r.id] = r; });
+  chatSnapshotInitialized = true;
+}
+
 async function refreshChatRoomList() {
   const res = await fetch("/api/chat/rooms");
   if (!res.ok) return;
-  chatRooms = await res.json();
+  const newRooms = await res.json();
+  detectAndNotifyRoomChanges(newRooms);
+  chatRooms = newRooms;
   updateChatBadgeFromRooms();
   // 대화방을 보고 있는 중이면 목록 새로고침이 그 화면을 덮지 않도록 둠
   if (document.getElementById(CHAT_VIEWS.list).style.display !== "none") renderChatRoomList();
@@ -1480,6 +1592,11 @@ function renderChatMessages(messages, append) {
       <div class="chat-time">${time}</div>`;
     box.appendChild(row);
     chatLastId = Math.max(chatLastId, m.id);
+    // append===true는 폴링으로 새로 온 메시지라는 뜻(초기 로드는 append===false) - 상대가 보낸 것만 알림
+    if (append && !mine) {
+      const roomTitle = document.getElementById("chatRoomTitle").textContent || m.store_name;
+      showChatNotification(`💬 ${roomTitle}`, `${m.store_name}: ${m.content}`);
+    }
   });
   if (!append || wasAtBottom) box.scrollTop = box.scrollHeight;
 }
@@ -1559,14 +1676,16 @@ function updateChatBadgeFromRooms() {
   else { badge.style.display = "none"; }
 }
 
-// 채팅창이 닫혀있는 동안에도 20초마다 조용히 목록을 확인해 배지를 갱신함
+// 채팅창이 닫혀있는 동안에도 20초마다 조용히 목록을 확인해 배지를 갱신하고, 새로 온 게 있으면 알림을 울림
 function startChatBadgeWatcher() {
   if (chatBadgeWatcher) clearInterval(chatBadgeWatcher);
   chatBadgeWatcher = setInterval(async () => {
     if (document.getElementById("chatModal").style.display !== "none") return;
     const res = await fetch("/api/chat/rooms");
     if (!res.ok) return;
-    chatRooms = await res.json();
+    const newRooms = await res.json();
+    detectAndNotifyRoomChanges(newRooms);
+    chatRooms = newRooms;
     updateChatBadgeFromRooms();
   }, 20000);
 }
