@@ -6,6 +6,9 @@
 import json
 import os
 import time
+import urllib.error
+import urllib.parse
+import urllib.request
 import uuid
 from datetime import date, datetime
 from pathlib import Path
@@ -310,6 +313,42 @@ CHAT_UPLOAD_ALLOWED_TYPES = {
     "application/x-zip-compressed": ".zip",
 }
 
+# ---------- 문자(SMS) / 카카오 알림톡 발송 - 알리고(Aligo, https://smartsms.aligo.in) 연동 ----------
+# 사용하려면 서버 환경변수에 알리고 계정 정보를 설정해야 합니다. 설정 전에는 503 오류로
+# "아직 연동되지 않았다"고 안내만 하고, 문자/알림톡은 실제로 나가지 않습니다.
+#   ALIGO_API_KEY, ALIGO_USER_ID        - 알리고 가입 후 발급받는 API 키 / 아이디
+#   ALIGO_SENDER                        - SMS 발신번호 (알리고에 사전 등록 및 통신사 인증 필요)
+#   ALIGO_KAKAO_SENDER_KEY              - 카카오 비즈니스 채널(발신프로필) 키 (카카오 알림톡용, 별도 심사)
+#   ALIGO_KAKAO_TEMPLATE_CODE           - 카카오에 승인받은 알림톡 템플릿 코드
+#     (알림톡은 승인된 템플릿 문구와 내용이 일치해야 정상 발송됩니다 - 변수만 바뀐 자유문구는 반려될 수 있음)
+#   ALIGO_TEST_MODE                     - "Y"(기본값, 테스트모드-실제발송 안 됨) / "N"(실제 발송)
+ALIGO_API_KEY = os.environ.get("ALIGO_API_KEY", "")
+ALIGO_USER_ID = os.environ.get("ALIGO_USER_ID", "")
+ALIGO_SENDER = os.environ.get("ALIGO_SENDER", "")
+ALIGO_KAKAO_SENDER_KEY = os.environ.get("ALIGO_KAKAO_SENDER_KEY", "")
+ALIGO_KAKAO_TEMPLATE_CODE = os.environ.get("ALIGO_KAKAO_TEMPLATE_CODE", "")
+ALIGO_TEST_MODE = os.environ.get("ALIGO_TEST_MODE", "Y")
+
+ALIGO_SMS_URL = "https://apis.aligo.in/send/"
+ALIGO_ALIMTALK_URL = "https://kakaoapi.aligo.in/akv10/alimtalk/send/"
+
+
+def _aligo_post(url: str, data: dict) -> dict:
+    """알리고 API는 application/x-www-form-urlencoded POST + JSON 응답 형식이라 공통으로 처리함"""
+    encoded = urllib.parse.urlencode(data).encode("utf-8")
+    req = urllib.request.Request(url, data=encoded, method="POST")
+    try:
+        with urllib.request.urlopen(req, timeout=10) as resp:
+            return json.loads(resp.read().decode("utf-8"))
+    except urllib.error.URLError as e:
+        raise HTTPException(status_code=502, detail=f"발송 서버와 통신할 수 없습니다: {e}")
+    except json.JSONDecodeError:
+        raise HTTPException(status_code=502, detail="발송 서버 응답을 읽을 수 없습니다")
+
+
+def _normalize_phone(phone: str) -> str:
+    return "".join(ch for ch in phone if ch.isdigit())
+
 
 def _do_backup(prefix: str) -> tuple[str, int]:
     BACKUP_DIR.mkdir(exist_ok=True)
@@ -416,6 +455,11 @@ class GroupRenameIn(BaseModel):
 
 class ChatMessageIn(BaseModel):
     content: str
+
+
+class NotifyIn(BaseModel):
+    phone: str
+    message: str
 
 
 @app.post("/api/login")
@@ -1828,6 +1872,74 @@ def get_chat_attachment(message_id: int, store: dict = Depends(get_current_store
         media_type=msg["attachment_mime"] or "application/octet-stream",
         filename=msg["attachment_original_name"] or "file",
     )
+
+
+# ---------- 문자(SMS) / 카카오 알림톡 발송 API ----------
+
+@app.post("/api/notify/sms")
+def send_sms_notify(body: NotifyIn, store: dict = Depends(get_current_store)):
+    if not (ALIGO_API_KEY and ALIGO_USER_ID and ALIGO_SENDER):
+        raise HTTPException(
+            status_code=503,
+            detail="문자 발송 서비스가 아직 연동되지 않았습니다. 알리고(Aligo) 가입 및 발신번호 등록 후 "
+                   "서버에 ALIGO_API_KEY / ALIGO_USER_ID / ALIGO_SENDER 환경변수를 설정해 주세요.",
+        )
+    phone = _normalize_phone(body.phone)
+    if not phone:
+        raise HTTPException(status_code=400, detail="받는 사람 번호를 입력해 주세요")
+    message = body.message.strip()
+    if not message:
+        raise HTTPException(status_code=400, detail="보낼 내용을 입력해 주세요")
+    if len(message.encode("utf-8")) > 2000:
+        raise HTTPException(status_code=400, detail="메시지가 너무 깁니다")
+
+    data = _aligo_post(ALIGO_SMS_URL, {
+        "key": ALIGO_API_KEY, "user_id": ALIGO_USER_ID, "sender": ALIGO_SENDER,
+        "receiver": phone, "msg": message,
+        # 바이트 기준 90자(한글 기준 약 45자) 넘으면 장문(LMS)으로 자동 전환
+        "msg_type": "LMS" if len(message.encode("euc-kr", errors="ignore")) > 90 else "SMS",
+        "testmode_yn": ALIGO_TEST_MODE,
+    })
+    if str(data.get("result_code")) != "1":
+        raise HTTPException(status_code=502, detail=f"문자 발송 실패: {data.get('message', '알 수 없는 오류')}")
+    return {"ok": True, "result": data, "test_mode": ALIGO_TEST_MODE == "Y"}
+
+
+@app.post("/api/notify/kakao")
+def send_kakao_notify(body: NotifyIn, store: dict = Depends(get_current_store)):
+    if not (ALIGO_API_KEY and ALIGO_USER_ID and ALIGO_KAKAO_SENDER_KEY and ALIGO_KAKAO_TEMPLATE_CODE):
+        raise HTTPException(
+            status_code=503,
+            detail="카카오 알림톡 발송 서비스가 아직 연동되지 않았습니다. 카카오 비즈니스 채널 개설과 "
+                   "알림톡 템플릿 승인을 먼저 받으신 뒤, 서버에 ALIGO_KAKAO_SENDER_KEY / "
+                   "ALIGO_KAKAO_TEMPLATE_CODE 환경변수를 설정해 주세요.",
+        )
+    phone = _normalize_phone(body.phone)
+    if not phone:
+        raise HTTPException(status_code=400, detail="받는 사람 번호를 입력해 주세요")
+    message = body.message.strip()
+    if not message:
+        raise HTTPException(status_code=400, detail="보낼 내용을 입력해 주세요")
+
+    payload = {
+        "apikey": ALIGO_API_KEY, "userid": ALIGO_USER_ID,
+        "senderkey": ALIGO_KAKAO_SENDER_KEY, "tpl_code": ALIGO_KAKAO_TEMPLATE_CODE,
+        "receiver_1": phone, "subject_1": "안내", "message_1": message,
+        "testMode": ALIGO_TEST_MODE,
+    }
+    # 발신번호가 등록돼 있으면, 알림톡이 실패했을 때(수신거부 등) 문자로 자동 대체 발송함
+    if ALIGO_SENDER:
+        payload.update({
+            "failover": "Y", "sender": ALIGO_SENDER,
+            "fsubject_1": "안내", "fmessage_1": message,
+        })
+    else:
+        payload["failover"] = "N"
+
+    data = _aligo_post(ALIGO_ALIMTALK_URL, payload)
+    if str(data.get("code")) != "0":
+        raise HTTPException(status_code=502, detail=f"카카오 알림톡 발송 실패: {data.get('message', '알 수 없는 오류')}")
+    return {"ok": True, "result": data, "test_mode": ALIGO_TEST_MODE == "Y"}
 
 
 # ---------- 프론트엔드 서빙 ----------
