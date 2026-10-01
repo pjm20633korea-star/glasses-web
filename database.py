@@ -68,6 +68,8 @@ def init_db():
         FOREIGN KEY (group_id) REFERENCES store_groups (id)
     )
     """)
+    # 문자/카카오 알림톡 발신번호 - 매장마다 다르게 설정 가능(비워두면 서버 기본 발신번호를 씀)
+    _migrate_add_column(cur, "stores", "sms_sender", "TEXT")
 
     cur.execute("""
     CREATE TABLE IF NOT EXISTS customers (

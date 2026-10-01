@@ -109,7 +109,7 @@
       <div id="storeMsg" class="msg" style="display:none;"></div>
 
       <table>
-        <thead><tr><th>No.</th><th>매장명</th><th>로그인 ID</th><th>소속 그룹</th><th>관리자</th><th style="width:150px;">관리</th></tr></thead>
+        <thead><tr><th>No.</th><th>매장명</th><th>로그인 ID</th><th>소속 그룹</th><th>관리자</th><th>발신번호</th><th style="width:150px;">관리</th></tr></thead>
         <tbody id="storeTableBody"></tbody>
       </table>
     </div>
@@ -129,6 +129,8 @@
     <select id="edit_store_admin"><option value="0">일반 매장</option><option value="1">관리자</option></select>
     <label>새 비밀번호 (비워두면 기존 비밀번호 유지)</label>
     <input id="edit_store_password" type="password" placeholder="비밀번호를 잊어버린 매장에게 새로 발급할 때만 입력">
+    <label>문자/카카오 발신번호 (비워두면 서버 기본 발신번호 사용)</label>
+    <input id="edit_store_sms_sender" placeholder="예: 0212345678 (하이픈 없이)">
     <div id="editStoreMsg" class="msg" style="display:none;"></div>
     <div style="display:flex; gap:8px; margin-top:14px;">
       <button style="flex:1;" onclick="saveStoreEdit()">저장</button>
@@ -262,6 +264,7 @@ function renderStoreTable() {
       <td>${s.login_id}</td>
       <td><select onchange="moveStoreGroup(${s.id}, this.value)">${groupOptions}</select></td>
       <td>${s.is_admin ? "✅" : ""}</td>
+      <td style="color:${s.sms_sender ? "#222" : "#999"};">${s.sms_sender || "(기본값)"}</td>
       <td>
         <button class="small btn-secondary" onclick="openStoreEditModal(${s.id})">수정</button>
         <button class="small btn-danger" onclick="deleteStore(${s.id})">삭제</button>
@@ -362,6 +365,7 @@ function openStoreEditModal(storeId) {
   document.getElementById("edit_store_login_id").value = s.login_id;
   document.getElementById("edit_store_admin").value = s.is_admin ? "1" : "0";
   document.getElementById("edit_store_password").value = "";
+  document.getElementById("edit_store_sms_sender").value = s.sms_sender || "";
   document.getElementById("editStoreMsg").style.display = "none";
   document.getElementById("storeEditModal").style.display = "flex";
 }
@@ -376,12 +380,13 @@ async function saveStoreEdit() {
   const login_id = document.getElementById("edit_store_login_id").value.trim();
   const is_admin = document.getElementById("edit_store_admin").value === "1";
   const new_password = document.getElementById("edit_store_password").value;
+  const sms_sender = document.getElementById("edit_store_sms_sender").value.trim();
   const msgEl = document.getElementById("editStoreMsg");
   if (!name || !login_id) {
     msgEl.className = "msg error"; msgEl.textContent = "매장 이름과 로그인 ID를 입력해 주세요."; msgEl.style.display = "";
     return;
   }
-  const body = { name, login_id, is_admin };
+  const body = { name, login_id, is_admin, sms_sender };
   if (new_password) body.new_password = new_password;
   const res = await fetch(`/api/admin/stores/${editingStoreId}`, {
     method: "PUT", headers: {"Content-Type": "application/json"}, body: JSON.stringify(body),

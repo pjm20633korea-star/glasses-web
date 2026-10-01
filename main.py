@@ -432,6 +432,7 @@ class StoreCreateIn(BaseModel):
     password: str
     group_id: Optional[int] = None  # 없으면 이 매장만의 새 그룹을 만듦(=독립 매장)
     is_admin: bool = False
+    sms_sender: Optional[str] = None  # 문자/알림톡 발신번호(매장별). 비워두면 서버 기본 발신번호 사용
 
 
 class StoreGroupCreateIn(BaseModel):
@@ -447,6 +448,7 @@ class StoreUpdateIn(BaseModel):
     login_id: str
     is_admin: bool = False
     new_password: Optional[str] = None  # 비워두면 비밀번호는 그대로 유지
+    sms_sender: Optional[str] = None  # 문자/알림톡 발신번호(매장별). 비워두면 서버 기본 발신번호 사용
 
 
 class GroupRenameIn(BaseModel):
@@ -523,7 +525,7 @@ def change_login_id(body: ChangeLoginIdIn, request: Request, store: dict = Depen
 def admin_list_stores(admin: dict = Depends(require_admin)):
     with get_db() as conn:
         rows = conn.execute("""
-            SELECT s.id, s.name, s.login_id, s.group_id, s.is_admin, g.name AS group_name
+            SELECT s.id, s.name, s.login_id, s.group_id, s.is_admin, s.sms_sender, g.name AS group_name
             FROM stores s JOIN store_groups g ON g.id = s.group_id
             ORDER BY s.id
         """).fetchall()
@@ -540,8 +542,10 @@ def admin_create_store(body: StoreCreateIn, admin: dict = Depends(require_admin)
         password_hash = bcrypt.hashpw(body.password.encode(), bcrypt.gensalt()).decode()
         try:
             cur = conn.execute(
-                "INSERT INTO stores (name, login_id, password_hash, group_id, is_admin) VALUES (?, ?, ?, ?, ?)",
-                (body.name, body.login_id, password_hash, group_id, int(body.is_admin)),
+                """INSERT INTO stores (name, login_id, password_hash, group_id, is_admin, sms_sender)
+                   VALUES (?, ?, ?, ?, ?, ?)""",
+                (body.name, body.login_id, password_hash, group_id, int(body.is_admin),
+                 (body.sms_sender or "").strip() or None),
             )
         except Exception:
             raise HTTPException(status_code=400, detail="이미 사용 중인 로그인 ID입니다")
@@ -569,17 +573,19 @@ def admin_update_store(store_id: int, body: StoreUpdateIn, admin: dict = Depends
             raise HTTPException(status_code=404, detail="매장을 찾을 수 없습니다")
         if store_id == admin["id"] and not body.is_admin:
             raise HTTPException(status_code=400, detail="현재 로그인한 관리자 계정의 관리자 권한은 스스로 해제할 수 없습니다")
+        sms_sender = (body.sms_sender or "").strip() or None
         try:
             if body.new_password:
                 new_hash = bcrypt.hashpw(body.new_password.encode(), bcrypt.gensalt()).decode()
                 conn.execute(
-                    "UPDATE stores SET name = ?, login_id = ?, is_admin = ?, password_hash = ? WHERE id = ?",
-                    (body.name, body.login_id, int(body.is_admin), new_hash, store_id),
+                    """UPDATE stores SET name = ?, login_id = ?, is_admin = ?, password_hash = ?, sms_sender = ?
+                       WHERE id = ?""",
+                    (body.name, body.login_id, int(body.is_admin), new_hash, sms_sender, store_id),
                 )
             else:
                 conn.execute(
-                    "UPDATE stores SET name = ?, login_id = ?, is_admin = ? WHERE id = ?",
-                    (body.name, body.login_id, int(body.is_admin), store_id),
+                    "UPDATE stores SET name = ?, login_id = ?, is_admin = ?, sms_sender = ? WHERE id = ?",
+                    (body.name, body.login_id, int(body.is_admin), sms_sender, store_id),
                 )
         except Exception:
             raise HTTPException(status_code=400, detail="이미 사용 중인 로그인 ID입니다")
@@ -1878,11 +1884,13 @@ def get_chat_attachment(message_id: int, store: dict = Depends(get_current_store
 
 @app.post("/api/notify/sms")
 def send_sms_notify(body: NotifyIn, store: dict = Depends(get_current_store)):
-    if not (ALIGO_API_KEY and ALIGO_USER_ID and ALIGO_SENDER):
+    sender = (store.get("sms_sender") or "").strip() or ALIGO_SENDER
+    if not (ALIGO_API_KEY and ALIGO_USER_ID and sender):
         raise HTTPException(
             status_code=503,
-            detail="문자 발송 서비스가 아직 연동되지 않았습니다. 알리고(Aligo) 가입 및 발신번호 등록 후 "
-                   "서버에 ALIGO_API_KEY / ALIGO_USER_ID / ALIGO_SENDER 환경변수를 설정해 주세요.",
+            detail="문자 발송 서비스가 아직 연동되지 않았습니다. 알리고(Aligo) 가입과 발신번호 등록이 "
+                   "필요하고, 서버에 ALIGO_API_KEY / ALIGO_USER_ID 환경변수(또는 이 매장의 발신번호)를 "
+                   "설정해 주세요. 매장별 발신번호는 관리자 화면(매장 관리)에서 등록할 수 있습니다.",
         )
     phone = _normalize_phone(body.phone)
     if not phone:
@@ -1894,7 +1902,7 @@ def send_sms_notify(body: NotifyIn, store: dict = Depends(get_current_store)):
         raise HTTPException(status_code=400, detail="메시지가 너무 깁니다")
 
     data = _aligo_post(ALIGO_SMS_URL, {
-        "key": ALIGO_API_KEY, "user_id": ALIGO_USER_ID, "sender": ALIGO_SENDER,
+        "key": ALIGO_API_KEY, "user_id": ALIGO_USER_ID, "sender": sender,
         "receiver": phone, "msg": message,
         # 바이트 기준 90자(한글 기준 약 45자) 넘으면 장문(LMS)으로 자동 전환
         "msg_type": "LMS" if len(message.encode("euc-kr", errors="ignore")) > 90 else "SMS",
@@ -1921,16 +1929,18 @@ def send_kakao_notify(body: NotifyIn, store: dict = Depends(get_current_store)):
     if not message:
         raise HTTPException(status_code=400, detail="보낼 내용을 입력해 주세요")
 
+    sender = (store.get("sms_sender") or "").strip() or ALIGO_SENDER
+
     payload = {
         "apikey": ALIGO_API_KEY, "userid": ALIGO_USER_ID,
         "senderkey": ALIGO_KAKAO_SENDER_KEY, "tpl_code": ALIGO_KAKAO_TEMPLATE_CODE,
         "receiver_1": phone, "subject_1": "안내", "message_1": message,
         "testMode": ALIGO_TEST_MODE,
     }
-    # 발신번호가 등록돼 있으면, 알림톡이 실패했을 때(수신거부 등) 문자로 자동 대체 발송함
-    if ALIGO_SENDER:
+    # 발신번호가 있으면(매장별 발신번호 우선), 알림톡이 실패했을 때(수신거부 등) 문자로 자동 대체 발송함
+    if sender:
         payload.update({
-            "failover": "Y", "sender": ALIGO_SENDER,
+            "failover": "Y", "sender": sender,
             "fsubject_1": "안내", "fmessage_1": message,
         })
     else:
