@@ -71,8 +71,6 @@ def init_db():
     # 문자/카카오 알림톡 발신번호 - 매장마다 다르게 설정 가능(비워두면 서버 기본 발신번호를 씀)
     _migrate_add_column(cur, "stores", "sms_sender", "TEXT")
     # 영수증발행(의료비영수증)/A/S전표 인쇄용 사업자 정보 - 매장이 설정(⚙️ 매장정보 탭)에서 직접 입력
-    _migrate_add_column(cur, "stores", "biz_reg_no", "TEXT")
-    _migrate_add_column(cur, "stores", "representative", "TEXT")
     _migrate_add_column(cur, "stores", "biz_address", "TEXT")
     _migrate_add_column(cur, "stores", "biz_phone", "TEXT")
     _migrate_add_column(cur, "stores", "stamp_filename", "TEXT")

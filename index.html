@@ -680,13 +680,9 @@
 
     <div class="as-body" id="settingsView_biz" style="display:none; max-height:65vh; overflow-y:auto;">
       <p style="font-size:10px; color:#888; margin:0 0 12px;">
-        A/S전표 인쇄, 영수증발행에 들어가는 이 매장의 사업자 정보입니다. 한 번 입력해 두면 인쇄물에 자동으로 채워집니다.
+        A/S전표 인쇄, 영수증발행에 들어가는 이 매장의 정보입니다. 한 번 입력해 두면 인쇄물에 자동으로 채워집니다.
       </p>
-      <label>사업자번호</label>
-      <input id="biz_reg_no" placeholder="000-00-00000">
-      <label style="margin-top:8px;">대표자</label>
-      <input id="biz_representative" placeholder="예: 홍길동">
-      <label style="margin-top:8px;">사업장주소</label>
+      <label>사업장주소</label>
       <input id="biz_address" placeholder="예: 경상남도 양산시 평산로 17(평산동)">
       <label style="margin-top:8px;">전화번호(TEL)</label>
       <input id="biz_phone" placeholder="예: 055-372-0666">
@@ -2152,8 +2148,6 @@ async function loadBusinessInfoTab() {
   const res = await fetch("/api/store/business-info");
   if (!res.ok) return;
   const data = await res.json();
-  document.getElementById("biz_reg_no").value = data.biz_reg_no || "";
-  document.getElementById("biz_representative").value = data.representative || "";
   document.getElementById("biz_address").value = data.biz_address || "";
   document.getElementById("biz_phone").value = data.biz_phone || "";
   refreshBizStampPreview(data.has_stamp);
@@ -2190,8 +2184,6 @@ async function deleteBizStamp() {
 }
 async function saveBusinessInfo() {
   const payload = {
-    biz_reg_no: document.getElementById("biz_reg_no").value || null,
-    representative: document.getElementById("biz_representative").value || null,
     biz_address: document.getElementById("biz_address").value || null,
     biz_phone: document.getElementById("biz_phone").value || null,
   };
@@ -2973,9 +2965,9 @@ async function loadReceiptBizInfoBox() {
   if (!res.ok) { box.textContent = "-"; return; }
   const b = await res.json();
   box.innerHTML = `
-    사업자번호: <b>${escapeHtml(b.biz_reg_no || "-")}</b> &nbsp; 상호/대표자: <b>${escapeHtml(b.name || "")} / ${escapeHtml(b.representative || "-")}</b><br>
+    상호: <b>${escapeHtml(b.name || "-")}</b><br>
     사업장주소: ${escapeHtml(b.biz_address || "-")} &nbsp; TEL: ${escapeHtml(b.biz_phone || "-")}
-    ${!b.biz_reg_no ? ` <span style="color:#c0392b;">(⚙️ 설정 &gt; 매장정보에서 입력해 주세요)</span>` : ""}`;
+    ${!b.biz_address ? ` <span style="color:#c0392b;">(⚙️ 설정 &gt; 매장정보에서 입력해 주세요)</span>` : ""}`;
 }
 async function searchReceiptCustomers() {
   const keyword = document.getElementById("receipt_search_keyword").value.trim();
@@ -3124,7 +3116,7 @@ function printReceiptView(payload, biz, totals) {
       </div>
       <div class="r-biz">
         ${biz.has_stamp ? `<img class="r-stamp" src="/api/store/stamp-image">` : ""}
-        사업자번호: ${escapeHtml(biz.biz_reg_no || "-")} &nbsp;&nbsp; 상호/대표자: ${escapeHtml(biz.name || "")} / ${escapeHtml(biz.representative || "-")}<br>
+        상호: ${escapeHtml(biz.name || "-")}<br>
         사업장주소: ${escapeHtml(biz.biz_address || "-")} &nbsp;&nbsp; TEL: ${escapeHtml(biz.biz_phone || "-")}
       </div>
     </body></html>`;

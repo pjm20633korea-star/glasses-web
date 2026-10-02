@@ -168,8 +168,6 @@ class ReceiptIn(BaseModel):
 
 
 class BusinessInfoIn(BaseModel):
-    biz_reg_no: Optional[str] = None
-    representative: Optional[str] = None
     biz_address: Optional[str] = None
     biz_phone: Optional[str] = None
 
@@ -806,8 +804,6 @@ STAMP_DIR = Path("store_stamps")
 def get_business_info(store: dict = Depends(get_current_store)):
     return {
         "name": store["name"],
-        "biz_reg_no": store["biz_reg_no"],
-        "representative": store["representative"],
         "biz_address": store["biz_address"],
         "biz_phone": store["biz_phone"],
         "has_stamp": bool(store["stamp_filename"]),
@@ -818,11 +814,8 @@ def get_business_info(store: dict = Depends(get_current_store)):
 def update_business_info(body: BusinessInfoIn, store: dict = Depends(get_current_store)):
     with get_db() as conn:
         conn.execute(
-            """UPDATE stores SET biz_reg_no=?, representative=?, biz_address=?, biz_phone=?
-               WHERE id=?""",
+            "UPDATE stores SET biz_address=?, biz_phone=? WHERE id=?",
             (
-                (body.biz_reg_no or "").strip() or None,
-                (body.representative or "").strip() or None,
                 (body.biz_address or "").strip() or None,
                 (body.biz_phone or "").strip() or None,
                 store["id"],
