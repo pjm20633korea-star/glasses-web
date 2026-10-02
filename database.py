@@ -164,6 +164,21 @@ def init_db():
     )
     """)
 
+    # 가족목록 수동 연결 - 휴대번호(대표)가 달라서 자동으로는 안 묶이는 가족(배우자가 번호를 따로 쓰는 경우 등)을
+    # 직접 연결해 둠. 한 행이 두 고객(customer_id ↔ family_customer_id)을 양방향으로 묶는 것으로 취급함
+    cur.execute("""
+    CREATE TABLE IF NOT EXISTS family_links (
+        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        customer_id INTEGER NOT NULL,
+        family_customer_id INTEGER NOT NULL,
+        relation TEXT,
+        created_at TEXT DEFAULT (datetime('now', 'localtime')),
+        store_id INTEGER,
+        FOREIGN KEY (customer_id) REFERENCES customers (id),
+        FOREIGN KEY (family_customer_id) REFERENCES customers (id)
+    )
+    """)
+
     # 반품 내역 (미수 잔액 자체는 별도 테이블 없이 exams.unpaid_amount를 그대로 조회해서 사용)
     cur.execute("""
     CREATE TABLE IF NOT EXISTS returns (

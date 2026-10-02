@@ -66,6 +66,11 @@ class ReturnItemIn(BaseModel):
     unit_price: Optional[float] = None
 
 
+class FamilyLinkIn(BaseModel):
+    family_customer_id: int
+    relation: Optional[str] = None
+
+
 class DeliveryIn(BaseModel):
     courier: Optional[str] = None
     tracking_no: Optional[str] = None
@@ -313,6 +318,7 @@ BACKUP_DIR = Path("backups")
 STORE_BACKUP_TABLES = [
     "customers", "exams", "sale_items", "visits", "returns", "settlements",
     "general_sales", "general_sale_items", "general_sale_returns", "as_records", "deliveries",
+    "family_links",
 ]
 
 # ---------- 구글 드라이브 백업 업로드 (선택사항) ----------
@@ -1698,6 +1704,99 @@ def delete_return(customer_id: int, return_id: int, store: dict = Depends(get_cu
                 restored = (exam["unpaid_amount"] or 0) + row["unpaid_offset"]
                 conn.execute("UPDATE exams SET unpaid_amount = ? WHERE id = ?", (restored, row["exam_id"]))
         conn.execute("DELETE FROM returns WHERE id = ?", (return_id,))
+        conn.commit()
+        return {"ok": True}
+
+
+# ---------- 가족목록 ----------
+# 휴대번호(대표)가 정확히 같은 고객은 자동으로 묶고, 번호가 다른 가족(배우자가 번호를 따로 쓰는 경우 등)은
+# family_links로 수동 연결함. 조회 시 둘을 합쳐서 한 목록으로 돌려주되, source로 구분(phone/manual)
+
+@app.get("/api/customers/{customer_id}/family")
+def list_family(customer_id: int, store: dict = Depends(get_current_store)):
+    group_ids = get_group_store_ids(store)
+    ph = _in_placeholders(group_ids)
+    with get_db() as conn:
+        customer = conn.execute(
+            f"SELECT * FROM customers WHERE id = ? AND store_id IN ({ph})", (customer_id, *group_ids)
+        ).fetchone()
+        if not customer:
+            raise HTTPException(status_code=404, detail="고객을 찾을 수 없습니다")
+
+        result = {}
+        if customer["phone"]:
+            rows = conn.execute(
+                f"SELECT * FROM customers WHERE phone = ? AND id != ? AND store_id IN ({ph})",
+                (customer["phone"], customer_id, *group_ids),
+            ).fetchall()
+            for r in rows:
+                result[r["id"]] = {
+                    "id": r["id"], "name": r["name"], "birth_date": r["birth_date"],
+                    "source": "phone", "relation": None, "link_id": None,
+                }
+
+        links = conn.execute(
+            "SELECT * FROM family_links WHERE customer_id = ? OR family_customer_id = ?",
+            (customer_id, customer_id),
+        ).fetchall()
+        for link in links:
+            other_id = link["family_customer_id"] if link["customer_id"] == customer_id else link["customer_id"]
+            other = conn.execute(
+                f"SELECT * FROM customers WHERE id = ? AND store_id IN ({ph})", (other_id, *group_ids)
+            ).fetchone()
+            if not other:
+                continue
+            result[other_id] = {
+                "id": other_id, "name": other["name"], "birth_date": other["birth_date"],
+                "source": "manual", "relation": link["relation"], "link_id": link["id"],
+            }
+
+        return sorted(result.values(), key=lambda x: x["name"] or "")
+
+
+@app.post("/api/customers/{customer_id}/family")
+def add_family_link(customer_id: int, body: FamilyLinkIn, store: dict = Depends(get_current_store)):
+    if body.family_customer_id == customer_id:
+        raise HTTPException(status_code=400, detail="본인을 가족으로 연결할 수 없습니다")
+    group_ids = get_group_store_ids(store)
+    ph = _in_placeholders(group_ids)
+    with get_db() as conn:
+        for cid in (customer_id, body.family_customer_id):
+            if not conn.execute(
+                f"SELECT id FROM customers WHERE id = ? AND store_id IN ({ph})", (cid, *group_ids)
+            ).fetchone():
+                raise HTTPException(status_code=404, detail="고객을 찾을 수 없습니다")
+
+        existing = conn.execute(
+            """SELECT id FROM family_links
+               WHERE (customer_id = ? AND family_customer_id = ?)
+                  OR (customer_id = ? AND family_customer_id = ?)""",
+            (customer_id, body.family_customer_id, body.family_customer_id, customer_id),
+        ).fetchone()
+        if existing:
+            raise HTTPException(status_code=400, detail="이미 가족으로 연결되어 있습니다")
+
+        cur = conn.execute(
+            "INSERT INTO family_links (customer_id, family_customer_id, relation, store_id) VALUES (?, ?, ?, ?)",
+            (customer_id, body.family_customer_id, body.relation, store["id"]),
+        )
+        conn.commit()
+        return {"id": cur.lastrowid}
+
+
+@app.delete("/api/customers/{customer_id}/family/{link_id}")
+def remove_family_link(customer_id: int, link_id: int, store: dict = Depends(get_current_store)):
+    with get_db() as conn:
+        row = conn.execute(
+            """SELECT * FROM family_links WHERE id = ?
+               AND (customer_id = ? OR family_customer_id = ?)""",
+            (link_id, customer_id, customer_id),
+        ).fetchone()
+        if not row:
+            raise HTTPException(status_code=404, detail="가족 연결을 찾을 수 없습니다")
+        if row["store_id"] != store["id"]:
+            raise HTTPException(status_code=403, detail="다른 매장의 기록은 수정할 수 없습니다")
+        conn.execute("DELETE FROM family_links WHERE id = ?", (link_id,))
         conn.commit()
         return {"ok": True}
 
