@@ -325,8 +325,8 @@
     </table>
 
     <div class="btn-row">
-      <button class="btn-secondary" disabled title="다음 단계에서 구현 예정">택배신청</button>
-      <button class="btn-secondary" disabled title="다음 단계에서 구현 예정">배송확인</button>
+      <button class="btn-secondary" onclick="openDeliveryModal('form')">택배신청</button>
+      <button class="btn-secondary" onclick="openDeliveryModal('list')">배송확인</button>
     </div>
   </div>
 
@@ -776,6 +776,92 @@
       </div>
     </div>
 
+  </div>
+</div>
+
+<!-- ================= 택배신청/배송확인 모달 =================
+     실제 택배사 API 연동 없이, 택배사 홈페이지에서 접수한 뒤 운송장번호 등을 기록해 두는 내부 장부.
+     "택배신청" 버튼은 신청 탭으로, "배송확인" 버튼은 목록 탭으로 각각 열림. 지금 화면에 올라와 있는
+     고객(currentCustomerId)에 딸린 기록만 다룸 -->
+<div id="deliveryModal" class="modal-overlay" style="display:none;">
+  <div class="modal-box as-modal-box" style="width:560px;">
+    <div class="as-titlebar">
+      <span>📦 택배</span>
+      <span class="as-close" onclick="closeDeliveryModal()">✕</span>
+    </div>
+    <div class="as-tabbar">
+      <div class="as-tab active" id="deliveryTab_form" onclick="switchDeliveryTab('form')">📦 택배신청</div>
+      <div class="as-tab" id="deliveryTab_list" onclick="switchDeliveryTab('list')">📋 배송확인</div>
+    </div>
+
+    <div class="as-body" id="deliveryFormView">
+      <div class="as-grid" style="grid-template-columns: 1fr 1fr;">
+        <div>
+          <label>택배사</label>
+          <select id="dv_courier">
+            <option>CJ대한통운</option>
+            <option>로젠택배</option>
+            <option>우체국택배</option>
+            <option>한진택배</option>
+            <option>롯데택배</option>
+            <option>기타</option>
+          </select>
+        </div>
+        <div>
+          <label>운송장번호</label>
+          <input id="dv_tracking_no" placeholder="접수 후 입력">
+        </div>
+        <div>
+          <label>수령인</label>
+          <input id="dv_recipient_name">
+        </div>
+        <div>
+          <label>수령인 연락처</label>
+          <input id="dv_recipient_phone" placeholder="010-0000-0000">
+        </div>
+        <div style="grid-column: span 2;">
+          <label>배송지 주소</label>
+          <input id="dv_address">
+        </div>
+        <div style="grid-column: span 2;">
+          <label>보내는 물품</label>
+          <input id="dv_item_desc" placeholder="예: 안경 A/S 완료 건">
+        </div>
+        <div>
+          <label>발송일</label>
+          <input id="dv_ship_date" type="date">
+        </div>
+        <div>
+          <label>상태</label>
+          <select id="dv_status">
+            <option>접수대기</option>
+            <option>발송완료</option>
+            <option>배송완료</option>
+          </select>
+        </div>
+        <div style="grid-column: span 2;">
+          <label>메모</label>
+          <input id="dv_memo">
+        </div>
+      </div>
+      <div class="btn-row" style="margin-top:10px;">
+        <button class="btn-primary" style="flex:1;" onclick="saveDelivery()">💾 저장</button>
+        <button class="btn-secondary" style="flex:1;" onclick="resetDeliveryForm()">📄 새 신청</button>
+      </div>
+    </div>
+
+    <div class="as-body" id="deliveryListView" style="display:none;">
+      <div class="table-scroll">
+        <table>
+          <thead>
+            <tr><th>발송일</th><th>택배사</th><th>운송장번호</th><th>수령인</th><th>상태</th><th>관리</th></tr>
+          </thead>
+          <tbody id="deliveryListBody">
+            <tr><td colspan="6" style="color:#aaa; height:60px;">-</td></tr>
+          </tbody>
+        </table>
+      </div>
+    </div>
   </div>
 </div>
 
@@ -3201,6 +3287,122 @@ function newCustomer() {
   resetVisitFieldsOnly();
   // 버튼 클릭의 기본 포커스 처리가 나중에 실행되며 되돌릴 수 있으므로 한 틱 미뤄서 확실히 이동시킴
   setTimeout(() => document.getElementById("c_name").focus(), 0);
+}
+
+/* ================= 택배신청 / 배송확인 =================
+   실제 택배사 API 연동 없이, 택배사 홈페이지에서 접수한 뒤 운송장번호 등을 기록해 두는 내부 장부.
+   지금 화면에 올라와 있는 고객(currentCustomerId)에 딸린 기록만 다룸 */
+let deliveryEditId = null; // null이면 새 신청, 값이 있으면 그 기록을 수정 중
+
+function openDeliveryModal(tab) {
+  if (!currentCustomerId) {
+    alert("먼저 고객을 선택하거나 등록해 주세요.");
+    return;
+  }
+  document.getElementById("deliveryModal").style.display = "flex";
+  switchDeliveryTab(tab);
+}
+
+function closeDeliveryModal() {
+  document.getElementById("deliveryModal").style.display = "none";
+}
+
+function switchDeliveryTab(tab) {
+  document.getElementById("deliveryTab_form").classList.toggle("active", tab === "form");
+  document.getElementById("deliveryTab_list").classList.toggle("active", tab === "list");
+  document.getElementById("deliveryFormView").style.display = tab === "form" ? "" : "none";
+  document.getElementById("deliveryListView").style.display = tab === "list" ? "" : "none";
+  if (tab === "list") loadDeliveryList();
+  else if (!deliveryEditId) resetDeliveryForm();
+}
+
+function resetDeliveryForm() {
+  deliveryEditId = null;
+  document.getElementById("dv_courier").value = "CJ대한통운";
+  document.getElementById("dv_tracking_no").value = "";
+  document.getElementById("dv_recipient_name").value = document.getElementById("c_name").value || "";
+  document.getElementById("dv_recipient_phone").value =
+    document.getElementById("c_phone").value || document.getElementById("c_phone2").value || "";
+  document.getElementById("dv_address").value = document.getElementById("c_address").value || "";
+  document.getElementById("dv_item_desc").value = "";
+  document.getElementById("dv_ship_date").value = todayStr();
+  document.getElementById("dv_status").value = "접수대기";
+  document.getElementById("dv_memo").value = "";
+}
+
+async function saveDelivery() {
+  const payload = {
+    courier: document.getElementById("dv_courier").value,
+    tracking_no: document.getElementById("dv_tracking_no").value.trim() || null,
+    recipient_name: document.getElementById("dv_recipient_name").value.trim() || null,
+    recipient_phone: document.getElementById("dv_recipient_phone").value.trim() || null,
+    address: document.getElementById("dv_address").value.trim() || null,
+    item_desc: document.getElementById("dv_item_desc").value.trim() || null,
+    ship_date: document.getElementById("dv_ship_date").value || todayStr(),
+    status: document.getElementById("dv_status").value,
+    memo: document.getElementById("dv_memo").value.trim() || null,
+  };
+  const url = deliveryEditId
+    ? `/api/customers/${currentCustomerId}/deliveries/${deliveryEditId}`
+    : `/api/customers/${currentCustomerId}/deliveries`;
+  const method = deliveryEditId ? "PUT" : "POST";
+  const res = await fetch(url, {
+    method, headers: {"Content-Type": "application/json"}, body: JSON.stringify(payload),
+  });
+  if (!res.ok) {
+    let detail = ""; try { detail = (await res.json()).detail || ""; } catch (e) { /* 무시 */ }
+    alert("저장 중 오류가 발생했습니다." + (detail ? "\n\n" + detail : ""));
+    return;
+  }
+  alert("저장되었습니다!");
+  switchDeliveryTab("list");
+}
+
+async function loadDeliveryList() {
+  const tbody = document.getElementById("deliveryListBody");
+  const res = await fetch(`/api/customers/${currentCustomerId}/deliveries`);
+  const rows = res.ok ? await res.json() : [];
+  if (rows.length === 0) {
+    tbody.innerHTML = '<tr><td colspan="6" style="color:#aaa; height:60px;">보낸 택배 기록이 없습니다</td></tr>';
+    return;
+  }
+  tbody.innerHTML = rows.map(d => `
+    <tr>
+      <td>${d.ship_date || ""}</td>
+      <td>${escapeHtml(d.courier || "")}</td>
+      <td>${escapeHtml(d.tracking_no || "")}</td>
+      <td>${escapeHtml(d.recipient_name || "")}</td>
+      <td>${escapeHtml(d.status || "")}</td>
+      <td>
+        <button class="btn-secondary" style="padding:3px 8px; font-size:10px;" onclick="loadDeliveryIntoForm(${d.id})">수정</button>
+        <button class="btn-danger" style="padding:3px 8px; font-size:10px;" onclick="deleteDeliveryRecord(${d.id})">삭제</button>
+      </td>
+    </tr>`).join("");
+}
+
+async function loadDeliveryIntoForm(id) {
+  const res = await fetch(`/api/customers/${currentCustomerId}/deliveries`);
+  const rows = res.ok ? await res.json() : [];
+  const d = rows.find(r => r.id === id);
+  if (!d) return;
+  deliveryEditId = d.id;
+  document.getElementById("dv_courier").value = d.courier || "CJ대한통운";
+  document.getElementById("dv_tracking_no").value = d.tracking_no || "";
+  document.getElementById("dv_recipient_name").value = d.recipient_name || "";
+  document.getElementById("dv_recipient_phone").value = d.recipient_phone || "";
+  document.getElementById("dv_address").value = d.address || "";
+  document.getElementById("dv_item_desc").value = d.item_desc || "";
+  document.getElementById("dv_ship_date").value = d.ship_date || todayStr();
+  document.getElementById("dv_status").value = d.status || "접수대기";
+  document.getElementById("dv_memo").value = d.memo || "";
+  switchDeliveryTab("form");
+}
+
+async function deleteDeliveryRecord(id) {
+  if (!confirm("이 택배 기록을 삭제하시겠습니까?")) return;
+  const res = await fetch(`/api/customers/${currentCustomerId}/deliveries/${id}`, { method: "DELETE" });
+  if (!res.ok) { alert("삭제 중 오류가 발생했습니다."); return; }
+  loadDeliveryList();
 }
 
 function clearFamilyList() {

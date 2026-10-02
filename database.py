@@ -143,6 +143,27 @@ def init_db():
     )
     """)
 
+    # 택배신청/배송확인 - 실제 택배사 API 연동 없이, 직원이 택배사 홈페이지에서 접수한 뒤
+    # 운송장번호 등을 여기에 기록해 두는 내부 기록부. 고객정보 패널(가족목록 아래)에서 다룸
+    cur.execute("""
+    CREATE TABLE IF NOT EXISTS deliveries (
+        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        customer_id INTEGER NOT NULL,
+        courier TEXT,
+        tracking_no TEXT,
+        recipient_name TEXT,
+        recipient_phone TEXT,
+        address TEXT,
+        item_desc TEXT,
+        ship_date TEXT,
+        status TEXT DEFAULT '접수대기',
+        memo TEXT,
+        created_at TEXT DEFAULT (datetime('now', 'localtime')),
+        store_id INTEGER,
+        FOREIGN KEY (customer_id) REFERENCES customers (id)
+    )
+    """)
+
     # 반품 내역 (미수 잔액 자체는 별도 테이블 없이 exams.unpaid_amount를 그대로 조회해서 사용)
     cur.execute("""
     CREATE TABLE IF NOT EXISTS returns (

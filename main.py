@@ -66,6 +66,18 @@ class ReturnItemIn(BaseModel):
     unit_price: Optional[float] = None
 
 
+class DeliveryIn(BaseModel):
+    courier: Optional[str] = None
+    tracking_no: Optional[str] = None
+    recipient_name: Optional[str] = None
+    recipient_phone: Optional[str] = None
+    address: Optional[str] = None
+    item_desc: Optional[str] = None
+    ship_date: Optional[str] = None
+    status: Optional[str] = "접수대기"
+    memo: Optional[str] = None
+
+
 class ReturnIn(BaseModel):
     return_date: Optional[str] = None
     exam_id: Optional[int] = None
@@ -300,7 +312,7 @@ BACKUP_DIR = Path("backups")
 # admin_delete_store에서 "매장 삭제 전 데이터가 남아있는지" 검사할 때도 이 목록을 그대로 재사용함
 STORE_BACKUP_TABLES = [
     "customers", "exams", "sale_items", "visits", "returns", "settlements",
-    "general_sales", "general_sale_items", "general_sale_returns", "as_records",
+    "general_sales", "general_sale_items", "general_sale_returns", "as_records", "deliveries",
 ]
 
 # ---------- 구글 드라이브 백업 업로드 (선택사항) ----------
@@ -1686,6 +1698,81 @@ def delete_return(customer_id: int, return_id: int, store: dict = Depends(get_cu
                 restored = (exam["unpaid_amount"] or 0) + row["unpaid_offset"]
                 conn.execute("UPDATE exams SET unpaid_amount = ? WHERE id = ?", (restored, row["exam_id"]))
         conn.execute("DELETE FROM returns WHERE id = ?", (return_id,))
+        conn.commit()
+        return {"ok": True}
+
+
+# ---------- 택배신청 / 배송확인 ----------
+# 실제 택배사 API 연동 없이, 직원이 택배사 홈페이지/앱에서 접수한 뒤 운송장번호 등을
+# 여기에 기록해 두는 내부 기록부. 특정 고객(currentCustomerId)에 딸린 기록으로 관리함
+
+@app.get("/api/customers/{customer_id}/deliveries")
+def list_deliveries(customer_id: int, store: dict = Depends(get_current_store)):
+    group_ids = get_group_store_ids(store)
+    ph = _in_placeholders(group_ids)
+    with get_db() as conn:
+        rows = conn.execute(
+            f"""SELECT * FROM deliveries WHERE customer_id = ? AND store_id IN ({ph})
+               ORDER BY id DESC""",
+            (customer_id, *group_ids),
+        ).fetchall()
+        return [dict(r) for r in rows]
+
+
+@app.post("/api/customers/{customer_id}/deliveries")
+def create_delivery(customer_id: int, body: DeliveryIn, store: dict = Depends(get_current_store)):
+    group_ids = get_group_store_ids(store)
+    ph = _in_placeholders(group_ids)
+    with get_db() as conn:
+        if not conn.execute(
+            f"SELECT id FROM customers WHERE id = ? AND store_id IN ({ph})", (customer_id, *group_ids)
+        ).fetchone():
+            raise HTTPException(status_code=404, detail="고객을 찾을 수 없습니다")
+        ship_date = body.ship_date or date.today().isoformat()
+        cur = conn.execute(
+            """INSERT INTO deliveries
+               (customer_id, courier, tracking_no, recipient_name, recipient_phone, address,
+                item_desc, ship_date, status, memo, store_id)
+               VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
+            (customer_id, body.courier, body.tracking_no, body.recipient_name, body.recipient_phone,
+             body.address, body.item_desc, ship_date, body.status or "접수대기", body.memo, store["id"]),
+        )
+        conn.commit()
+        return {"id": cur.lastrowid}
+
+
+@app.put("/api/customers/{customer_id}/deliveries/{delivery_id}")
+def update_delivery(customer_id: int, delivery_id: int, body: DeliveryIn, store: dict = Depends(get_current_store)):
+    with get_db() as conn:
+        row = conn.execute(
+            "SELECT store_id FROM deliveries WHERE id = ? AND customer_id = ?", (delivery_id, customer_id),
+        ).fetchone()
+        if not row:
+            raise HTTPException(status_code=404, detail="택배 기록을 찾을 수 없습니다")
+        if row["store_id"] != store["id"]:
+            raise HTTPException(status_code=403, detail="다른 매장의 기록은 수정할 수 없습니다")
+        ship_date = body.ship_date or date.today().isoformat()
+        conn.execute(
+            """UPDATE deliveries SET courier=?, tracking_no=?, recipient_name=?, recipient_phone=?,
+               address=?, item_desc=?, ship_date=?, status=?, memo=? WHERE id=?""",
+            (body.courier, body.tracking_no, body.recipient_name, body.recipient_phone, body.address,
+             body.item_desc, ship_date, body.status or "접수대기", body.memo, delivery_id),
+        )
+        conn.commit()
+        return {"ok": True}
+
+
+@app.delete("/api/customers/{customer_id}/deliveries/{delivery_id}")
+def delete_delivery(customer_id: int, delivery_id: int, store: dict = Depends(get_current_store)):
+    with get_db() as conn:
+        row = conn.execute(
+            "SELECT store_id FROM deliveries WHERE id = ? AND customer_id = ?", (delivery_id, customer_id),
+        ).fetchone()
+        if not row:
+            raise HTTPException(status_code=404, detail="택배 기록을 찾을 수 없습니다")
+        if row["store_id"] != store["id"]:
+            raise HTTPException(status_code=403, detail="다른 매장의 기록은 삭제할 수 없습니다")
+        conn.execute("DELETE FROM deliveries WHERE id = ?", (delivery_id,))
         conn.commit()
         return {"ok": True}
 
