@@ -70,6 +70,12 @@ def init_db():
     """)
     # 문자/카카오 알림톡 발신번호 - 매장마다 다르게 설정 가능(비워두면 서버 기본 발신번호를 씀)
     _migrate_add_column(cur, "stores", "sms_sender", "TEXT")
+    # 영수증발행(의료비영수증)/A/S전표 인쇄용 사업자 정보 - 매장이 설정(⚙️ 매장정보 탭)에서 직접 입력
+    _migrate_add_column(cur, "stores", "biz_reg_no", "TEXT")
+    _migrate_add_column(cur, "stores", "representative", "TEXT")
+    _migrate_add_column(cur, "stores", "biz_address", "TEXT")
+    _migrate_add_column(cur, "stores", "biz_phone", "TEXT")
+    _migrate_add_column(cur, "stores", "stamp_filename", "TEXT")
 
     cur.execute("""
     CREATE TABLE IF NOT EXISTS customers (
@@ -302,6 +308,31 @@ def init_db():
         print_vendor INTEGER,
         created_at TEXT,
         store_id INTEGER
+    )
+    """)
+
+    # ---- 영수증발행 (시력보정용 의료비영수증 발행 이력) ----
+    # 발행 시점의 구매내역(제외 체크 반영)을 items_json에 그대로 스냅샷으로 남겨서,
+    # 나중에 구매기록이 수정/삭제되어도 발행목록에서 당시 발행된 내용 그대로 재인쇄할 수 있게 함
+    cur.execute("""
+    CREATE TABLE IF NOT EXISTS receipts (
+        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        customer_id INTEGER,
+        customer_name TEXT,
+        issue_date TEXT NOT NULL,
+        resident_id1 TEXT,
+        resident_id2 TEXT,
+        address TEXT,
+        cash_only INTEGER DEFAULT 0,
+        detail_option INTEGER DEFAULT 1,
+        items_json TEXT,
+        total_card REAL DEFAULT 0,
+        total_cash_receipt REAL DEFAULT 0,
+        total_cash REAL DEFAULT 0,
+        total_amount REAL DEFAULT 0,
+        created_at TEXT DEFAULT (datetime('now', 'localtime')),
+        store_id INTEGER,
+        FOREIGN KEY (customer_id) REFERENCES customers (id)
     )
     """)
 

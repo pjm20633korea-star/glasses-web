@@ -145,6 +145,35 @@ class ASRecordIn(BaseModel):
 AS_RECORD_FIELDS = [f for f in ASRecordIn.__fields__.keys() if f != "receive_date"]
 
 
+class ReceiptItemIn(BaseModel):
+    source: Optional[str] = None
+    source_id: Optional[int] = None
+    purchase_date: Optional[str] = None
+    description: Optional[str] = None
+    card_amount: Optional[float] = 0
+    cash_receipt_amount: Optional[float] = 0
+    cash_amount: Optional[float] = 0
+
+
+class ReceiptIn(BaseModel):
+    customer_id: Optional[int] = None
+    customer_name: Optional[str] = None
+    issue_date: Optional[str] = None
+    resident_id1: Optional[str] = None
+    resident_id2: Optional[str] = None
+    address: Optional[str] = None
+    cash_only: Optional[bool] = False
+    detail_option: Optional[bool] = True
+    items: List[ReceiptItemIn] = []
+
+
+class BusinessInfoIn(BaseModel):
+    biz_reg_no: Optional[str] = None
+    representative: Optional[str] = None
+    biz_address: Optional[str] = None
+    biz_phone: Optional[str] = None
+
+
 class ExamIn(BaseModel):
     exam_date: Optional[str] = None
     sale_type: Optional[str] = "exam"  # "exam"=검안매출(판매), "general"=일반판매
@@ -318,7 +347,7 @@ BACKUP_DIR = Path("backups")
 STORE_BACKUP_TABLES = [
     "customers", "exams", "sale_items", "visits", "returns", "settlements",
     "general_sales", "general_sale_items", "general_sale_returns", "as_records", "deliveries",
-    "family_links",
+    "family_links", "receipts",
 ]
 
 # ---------- 구글 드라이브 백업 업로드 (선택사항) ----------
@@ -765,6 +794,87 @@ def me(store: dict = Depends(get_current_store)):
         "is_admin": bool(store["is_admin"]), "group_id": store["group_id"],
         "group_name": group["name"] if group else None,
     }
+
+
+# ---------- 매장 사업자정보(영수증발행/A·S전표 인쇄용) ----------
+# A/S전표, 영수증발행 등 인쇄물 하단에 들어가는 상호/사업자번호/대표자/주소/전화/도장을 매장이 직접 관리함
+
+STAMP_DIR = Path("store_stamps")
+
+
+@app.get("/api/store/business-info")
+def get_business_info(store: dict = Depends(get_current_store)):
+    return {
+        "name": store["name"],
+        "biz_reg_no": store["biz_reg_no"],
+        "representative": store["representative"],
+        "biz_address": store["biz_address"],
+        "biz_phone": store["biz_phone"],
+        "has_stamp": bool(store["stamp_filename"]),
+    }
+
+
+@app.put("/api/store/business-info")
+def update_business_info(body: BusinessInfoIn, store: dict = Depends(get_current_store)):
+    with get_db() as conn:
+        conn.execute(
+            """UPDATE stores SET biz_reg_no=?, representative=?, biz_address=?, biz_phone=?
+               WHERE id=?""",
+            (
+                (body.biz_reg_no or "").strip() or None,
+                (body.representative or "").strip() or None,
+                (body.biz_address or "").strip() or None,
+                (body.biz_phone or "").strip() or None,
+                store["id"],
+            ),
+        )
+        conn.commit()
+    return {"ok": True}
+
+
+@app.post("/api/store/stamp")
+async def upload_stamp(file: UploadFile = File(...), store: dict = Depends(get_current_store)):
+    content_type = (file.content_type or "").split(";")[0].strip().lower()
+    ext = {"image/png": ".png", "image/jpeg": ".jpg", "image/jpg": ".jpg"}.get(content_type)
+    if not ext:
+        raise HTTPException(status_code=400, detail="도장 이미지는 PNG 또는 JPG 파일만 가능합니다")
+    data = await file.read()
+    if not data:
+        raise HTTPException(status_code=400, detail="빈 파일은 올릴 수 없습니다")
+    if len(data) > 2 * 1024 * 1024:
+        raise HTTPException(status_code=400, detail="파일이 너무 큽니다 (최대 2MB)")
+
+    STAMP_DIR.mkdir(exist_ok=True)
+    with get_db() as conn:
+        old_row = conn.execute("SELECT stamp_filename FROM stores WHERE id = ?", (store["id"],)).fetchone()
+        if old_row and old_row["stamp_filename"]:
+            (STAMP_DIR / old_row["stamp_filename"]).unlink(missing_ok=True)
+        stored_name = f"store_{store['id']}_{uuid.uuid4().hex}{ext}"
+        (STAMP_DIR / stored_name).write_bytes(data)
+        conn.execute("UPDATE stores SET stamp_filename = ? WHERE id = ?", (stored_name, store["id"]))
+        conn.commit()
+    return {"ok": True}
+
+
+@app.delete("/api/store/stamp")
+def delete_stamp(store: dict = Depends(get_current_store)):
+    with get_db() as conn:
+        row = conn.execute("SELECT stamp_filename FROM stores WHERE id = ?", (store["id"],)).fetchone()
+        if row and row["stamp_filename"]:
+            (STAMP_DIR / row["stamp_filename"]).unlink(missing_ok=True)
+        conn.execute("UPDATE stores SET stamp_filename = NULL WHERE id = ?", (store["id"],))
+        conn.commit()
+    return {"ok": True}
+
+
+@app.get("/api/store/stamp-image")
+def get_stamp_image(store: dict = Depends(get_current_store)):
+    if not store["stamp_filename"]:
+        raise HTTPException(status_code=404, detail="등록된 도장 이미지가 없습니다")
+    path = STAMP_DIR / store["stamp_filename"]
+    if not path.exists():
+        raise HTTPException(status_code=404, detail="등록된 도장 이미지가 없습니다")
+    return FileResponse(path)
 
 
 @app.post("/api/change-password")
@@ -1476,6 +1586,126 @@ def delete_as_record(as_id: int, store: dict = Depends(get_current_store)):
         conn.execute("DELETE FROM as_records WHERE id = ?", (as_id,))
         conn.commit()
         return {"ok": True}
+
+
+# ---------- 영수증발행 (시력보정용 의료비영수증) API ----------
+# 고객의 검안매출(exams) 기록을 구매내역 후보로 보여주고, 그중 제외하지 않은 건만 묶어서 발행함.
+# 현금영수증 발행 여부(cash_receipt_type)에 따라 같은 현금 금액을 "현금영수액"과 "현금금액" 중 한 쪽으로 나눔
+
+@app.get("/api/receipts/purchases")
+def list_receipt_purchases(customer_id: int, date_from: Optional[str] = None,
+                            date_to: Optional[str] = None, store: dict = Depends(get_current_store)):
+    group_ids = get_group_store_ids(store)
+    ph = _in_placeholders(group_ids)
+    query = f"SELECT * FROM exams WHERE customer_id = ? AND store_id IN ({ph})"
+    params: list = [customer_id, *group_ids]
+    if date_from:
+        query += " AND exam_date >= ?"
+        params.append(date_from)
+    if date_to:
+        query += " AND exam_date <= ?"
+        params.append(date_to)
+    query += " ORDER BY exam_date ASC, id ASC"
+
+    with get_db() as conn:
+        exams = conn.execute(query, params).fetchall()
+        items = []
+        for ex in exams:
+            sale_total = ex["sale_total"] or 0
+            if not sale_total:
+                continue  # 매출(결제) 없는 검안 기록은 영수증 대상이 아님
+            item_rows = conn.execute(
+                "SELECT brand, product_name FROM sale_items WHERE exam_id = ?", (ex["id"],)
+            ).fetchall()
+            desc = ", ".join(
+                " ".join(p for p in (r["brand"], r["product_name"]) if p) for r in item_rows if r["brand"] or r["product_name"]
+            ) or "구매내역"
+            cash_amount = ex["cash_amount"] or 0
+            has_cash_receipt = bool((ex["cash_receipt_type"] or "").strip())
+            items.append({
+                "source": "exam",
+                "source_id": ex["id"],
+                "purchase_date": ex["exam_date"],
+                "description": desc,
+                "card_amount": ex["card_amount"] or 0,
+                "cash_receipt_amount": cash_amount if has_cash_receipt else 0,
+                "cash_amount": 0 if has_cash_receipt else cash_amount,
+                "total": sale_total,
+            })
+        return items
+
+
+@app.post("/api/receipts")
+def create_receipt(body: ReceiptIn, store: dict = Depends(get_current_store)):
+    issue_date = body.issue_date or date.today().isoformat()
+    total_card = sum(i.card_amount or 0 for i in body.items)
+    total_cash_receipt = sum(i.cash_receipt_amount or 0 for i in body.items)
+    total_cash = sum(i.cash_amount or 0 for i in body.items)
+    with get_db() as conn:
+        cur = conn.execute(
+            """INSERT INTO receipts
+               (customer_id, customer_name, issue_date, resident_id1, resident_id2, address,
+                cash_only, detail_option, items_json, total_card, total_cash_receipt, total_cash,
+                total_amount, store_id)
+               VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
+            (
+                body.customer_id, (body.customer_name or "").strip() or None, issue_date,
+                (body.resident_id1 or "").strip() or None, (body.resident_id2 or "").strip() or None,
+                (body.address or "").strip() or None, int(bool(body.cash_only)), int(bool(body.detail_option)),
+                json.dumps([i.dict() for i in body.items], ensure_ascii=False),
+                total_card, total_cash_receipt, total_cash,
+                total_card + total_cash_receipt + total_cash, store["id"],
+            ),
+        )
+        conn.commit()
+        return {"id": cur.lastrowid}
+
+
+@app.get("/api/receipts")
+def list_receipts(search_type: Optional[str] = None, keyword: Optional[str] = None,
+                   date_from: Optional[str] = None, date_to: Optional[str] = None,
+                   store: dict = Depends(get_current_store)):
+    group_ids = get_group_store_ids(store)
+    ph = _in_placeholders(group_ids)
+    query = f"SELECT * FROM receipts WHERE store_id IN ({ph})"
+    params: list = list(group_ids)
+
+    if keyword:
+        if search_type == "고객번호" and keyword.isdigit():
+            query += " AND customer_id = ?"
+            params.append(int(keyword))
+        else:
+            query += " AND customer_name LIKE ?"
+            params.append(f"%{keyword}%")
+    if date_from:
+        query += " AND issue_date >= ?"
+        params.append(date_from)
+    if date_to:
+        query += " AND issue_date <= ?"
+        params.append(date_to)
+
+    query += " ORDER BY id DESC"
+    with get_db() as conn:
+        rows = conn.execute(query, params).fetchall()
+        return [dict(r) for r in rows]
+
+
+@app.get("/api/receipts/{receipt_id}")
+def get_receipt(receipt_id: int, store: dict = Depends(get_current_store)):
+    group_ids = get_group_store_ids(store)
+    ph = _in_placeholders(group_ids)
+    with get_db() as conn:
+        row = conn.execute(
+            f"SELECT * FROM receipts WHERE id = ? AND store_id IN ({ph})", (receipt_id, *group_ids)
+        ).fetchone()
+        if not row:
+            raise HTTPException(status_code=404, detail="발행 기록을 찾을 수 없습니다")
+        data = dict(row)
+        try:
+            data["items"] = json.loads(data.get("items_json") or "[]")
+        except Exception:
+            data["items"] = []
+        return data
 
 
 # ---------- 반품 / 미수 API ----------
