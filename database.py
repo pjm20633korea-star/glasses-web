@@ -131,6 +131,18 @@ def init_db():
     )
     """)
 
+    # 고객검색(F6)에서 고객을 선택할 때마다 남는 기록 - "최근검색고객" 버튼에서 최근 며칠치를 보여주는 용도.
+    # 업무 데이터가 아니라 단순 사용 이력이라 매장 백업/복구 범위(STORE_BACKUP_TABLES)에는 포함하지 않음
+    cur.execute("""
+    CREATE TABLE IF NOT EXISTS customer_search_log (
+        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        store_id INTEGER NOT NULL,
+        customer_id INTEGER NOT NULL,
+        searched_at TEXT DEFAULT (datetime('now', 'localtime')),
+        FOREIGN KEY (customer_id) REFERENCES customers (id)
+    )
+    """)
+
     # 반품 내역 (미수 잔액 자체는 별도 테이블 없이 exams.unpaid_amount를 그대로 조회해서 사용)
     cur.execute("""
     CREATE TABLE IF NOT EXISTS returns (

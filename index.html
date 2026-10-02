@@ -254,6 +254,21 @@
       <div class="icon-circle">💰</div>
       <span class="label">미수금현황</span>
     </div>
+    <!-- 탭 전환은 안 되고, 눌렀을 때 아래 검안매출 화면 위로 최근 검색 목록만 떠 있다가 사라짐 -->
+    <div class="mega-icon-btn" id="recentSearchBtn" style="position:relative;" onclick="toggleRecentSearchPanel(event)">
+      <div class="icon-circle">🕘</div>
+      <span class="label">최근검색고객</span>
+      <div id="recentSearchPanel" onclick="event.stopPropagation()"
+           style="display:none; position:absolute; top:100%; left:50%; transform:translateX(-50%);
+                  z-index:200; background:white; border:1px solid #dde1e8; border-radius:8px;
+                  box-shadow:0 6px 18px rgba(0,0,0,0.18); width:260px; max-height:320px; overflow-y:auto;
+                  text-align:left; font-weight:normal; color:#222;">
+        <div style="padding:8px 12px; font-size:11px; font-weight:bold; color:#2b3a55; border-bottom:1px solid #eee;">
+          🕘 최근 3일간 검색한 고객
+        </div>
+        <div id="recentSearchList"></div>
+      </div>
+    </div>
   </div>
   <div id="openTabsBar" class="open-tabs-bar"></div>
 </div>
@@ -3092,6 +3107,64 @@ function updateCustomerOwnershipUI(c) {
   document.getElementById("c_gender").disabled = isForeign;
 }
 
+/* ================= 최근검색고객 패널 =================
+   검안매출 탭 버튼 옆의 시계 아이콘 - 눌러도 탭은 안 바뀌고, 그 자리 바로 아래에 최근 3일간
+   고객검색(F6)으로 선택했던 고객 목록만 떠 있다가 다른 곳을 클릭하면 사라짐 */
+async function toggleRecentSearchPanel(event) {
+  event.stopPropagation(); // 바깥 클릭 감지 리스너가 이 클릭까지 바깥 클릭으로 오해해서 바로 닫아버리지 않도록 함
+  const panel = document.getElementById("recentSearchPanel");
+  if (panel.style.display !== "none") { closeRecentSearchPanel(); return; }
+
+  panel.style.display = "block";
+  const listBox = document.getElementById("recentSearchList");
+  listBox.innerHTML = '<div style="padding:12px; font-size:11px; color:#99a; text-align:center;">불러오는 중...</div>';
+  const res = await fetch("/api/customers/recent-searches?days=3");
+  renderRecentSearchPanel(res.ok ? await res.json() : []);
+  document.addEventListener("click", closeRecentSearchPanelOnOutsideClick);
+}
+
+function closeRecentSearchPanel() {
+  document.getElementById("recentSearchPanel").style.display = "none";
+  document.removeEventListener("click", closeRecentSearchPanelOnOutsideClick);
+}
+
+function closeRecentSearchPanelOnOutsideClick(e) {
+  if (!document.getElementById("recentSearchBtn").contains(e.target)) closeRecentSearchPanel();
+}
+
+function renderRecentSearchPanel(rows) {
+  const box = document.getElementById("recentSearchList");
+  if (rows.length === 0) {
+    box.innerHTML = '<div style="padding:14px 12px; font-size:11px; color:#99a; text-align:center;">최근 3일간 검색한 고객이 없습니다.</div>';
+    return;
+  }
+  box.innerHTML = rows.map(r => `
+    <div class="modal-row-clickable" style="padding:7px 12px; border-bottom:1px solid #f0f0f0; font-size:12px;"
+         onclick="event.stopPropagation(); selectRecentSearchCustomer(${r.customer_id})">
+      <span style="color:#889;">${formatRecentSearchLabel(r.searched_at)}</span>
+      <b style="margin-left:4px;">${escapeHtml(r.customer_name)}</b>
+    </div>`).join("");
+}
+
+// DB에는 "YYYY-MM-DD HH:MM:SS"로 저장되어 있음 -> "yy년도-mm월-dd일 오전/오후"로 바꿔줌
+function formatRecentSearchLabel(searchedAt) {
+  const [datePart, timePart] = (searchedAt || "").split(" ");
+  const [y, m, d] = (datePart || "").split("-");
+  const hour = Number((timePart || "0").split(":")[0]);
+  const ampm = hour < 12 ? "오전" : "오후";
+  return `${(y || "").slice(2)}년도-${m}월-${d}일 ${ampm}`;
+}
+
+async function selectRecentSearchCustomer(customerId) {
+  closeRecentSearchPanel();
+  const res = await fetch(`/api/customers/${customerId}`);
+  if (!res.ok) { alert("고객 정보를 불러오지 못했습니다."); return; }
+  const customer = await res.json();
+  logCustomerSearch(customerId);
+  await switchSalesMenu("exam");
+  await selectCustomer(customer);
+}
+
 async function selectCustomer(c) {
   currentCustomerId = c.id;
   document.getElementById("c_no").value = c.id;
@@ -4816,8 +4889,14 @@ function renderPreviewTable(tableId, labels, record) {
 
 function chooseModalCustomer() {
   if (!modalSelectedCustomer) { alert("목록에서 고객을 먼저 클릭해 주세요"); return; }
+  logCustomerSearch(modalSelectedCustomer.id);
   selectCustomer(modalSelectedCustomer);
   closeSearchModal();
+}
+
+// "최근검색고객" 패널에 쓰려고 고객검색(F6)에서 고를 때마다 서버에 기록해 둠 (실패해도 검색 자체엔 지장 없음)
+function logCustomerSearch(customerId) {
+  fetch(`/api/customers/${customerId}/search-log`, { method: "POST" }).catch(() => {});
 }
 
 // 모달에서 고른 날짜의 기록을 그대로 메인 화면에 불러와서 수정할 수 있게 함

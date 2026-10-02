@@ -875,6 +875,7 @@ def admin_delete_store(store_id: int, admin: dict = Depends(require_admin)):
             ).fetchone()[0]
             if other_admins == 0:
                 raise HTTPException(status_code=400, detail="마지막 남은 관리자 계정은 삭제할 수 없습니다")
+        conn.execute("DELETE FROM customer_search_log WHERE store_id = ?", (store_id,))  # 업무 데이터는 아니라 위 검사 대상에서 빠짐 - 매장 삭제 시 같이 정리
         conn.execute("DELETE FROM stores WHERE id = ?", (store_id,))
         conn.commit()
         return {"ok": True}
@@ -964,6 +965,39 @@ def search_customers(q: Optional[str] = None, phone_exact: Optional[str] = None,
                 (*group_ids, limit),
             ).fetchall()
         return [dict(r) for r in rows]
+
+
+@app.get("/api/customers/recent-searches")
+def list_recent_customer_searches(days: int = 3, store: dict = Depends(get_current_store)):
+    """'최근검색고객' 패널용 - 이 매장에서 최근 N일 동안 고객검색(F6)으로 선택한 기록을 최신순으로 돌려줌"""
+    days = min(max(days, 1), 30)
+    with get_db() as conn:
+        rows = conn.execute(
+            """SELECT l.customer_id, c.name AS customer_name, l.searched_at
+               FROM customer_search_log l JOIN customers c ON c.id = l.customer_id
+               WHERE l.store_id = ? AND l.searched_at >= datetime('now', 'localtime', ?)
+               ORDER BY l.id DESC LIMIT 200""",
+            (store["id"], f"-{days} days"),
+        ).fetchall()
+    return [dict(r) for r in rows]
+
+
+@app.post("/api/customers/{customer_id}/search-log")
+def log_customer_search(customer_id: int, store: dict = Depends(get_current_store)):
+    group_ids = get_group_store_ids(store)
+    ph = _in_placeholders(group_ids)
+    with get_db() as conn:
+        exists = conn.execute(
+            f"SELECT id FROM customers WHERE id = ? AND store_id IN ({ph})", (customer_id, *group_ids)
+        ).fetchone()
+        if not exists:
+            raise HTTPException(status_code=404, detail="고객을 찾을 수 없습니다")
+        conn.execute(
+            "INSERT INTO customer_search_log (store_id, customer_id) VALUES (?, ?)",
+            (store["id"], customer_id),
+        )
+        conn.commit()
+    return {"ok": True}
 
 
 @app.get("/api/customers/{customer_id}")
